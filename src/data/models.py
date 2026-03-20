@@ -1,0 +1,304 @@
+"""
+COC文字冒险游戏框架 - 数据模型定义
+基于Pydantic的类型安全数据模型
+"""
+
+from typing import List, Dict, Optional, Any, Union
+from pydantic import BaseModel, Field
+from enum import Enum
+
+
+# ============================================================
+# 基础类型定义
+# ============================================================
+
+class Description(BaseModel):
+    """二级描述系统 - 支持public和hint"""
+    public: List[Dict[str, str]] = Field(default_factory=list, description="公开描述列表")
+    hint: str = Field(default="", description="仅AI知道的隐藏提示")
+
+    def get_public_text(self) -> str:
+        """获取所有公开描述的拼接文本"""
+        return "\n".join([p.get("description", "") for p in self.public])
+    
+    def add_public_description(self, text: str) -> None:
+        """添加新的公开描述"""
+        self.public.append({"description": text})
+
+
+class Memory(BaseModel):
+    """角色记忆系统"""
+    current_event: str = Field(default="", description="当前回合可见信息")
+    log: List[str] = Field(default_factory=list, description="完整行动日志")
+
+    def push_to_log(self, event: str) -> None:
+        """将当前事件压入日志并重置current_event"""
+        if self.current_event:
+            self.log.append(self.current_event)
+        self.current_event = event
+
+    def clear_current(self) -> None:
+        """清空current_event（每回合开始时调用）"""
+        if self.current_event:
+            self.log.append(self.current_event)
+            self.current_event = ""
+
+
+# ============================================================
+# 角色属性定义
+# ============================================================
+
+class CharacterAttributes(BaseModel):
+    """COC角色属性（七大主属性）"""
+    str: int = Field(default=10, ge=1, le=99, description="力量 STRENGTH")
+    con: int = Field(default=10, ge=1, le=99, description="体质 CONSTITUTION")
+    siz: int = Field(default=10, ge=1, le=99, description="体型 SIZE")
+    dex: int = Field(default=10, ge=1, le=99, description="敏捷 DEXTERITY")
+    app: int = Field(default=10, ge=1, le=99, description="外貌 APPEARANCE")
+    int: int = Field(default=10, ge=1, le=99, description="智力 INTELLIGENCE")
+    pow: int = Field(default=10, ge=1, le=99, description="意志 POWER")
+    edu: int = Field(default=10, ge=1, le=99, description="教育 EDUCATION")
+
+
+class CharacterStatus(BaseModel):
+    """角色状态（动态变化）"""
+    hp: int = Field(default=10, description="生命值 Hit Points")
+    max_hp: int = Field(default=10, description="最大生命值")
+    san: int = Field(default=50, ge=0, le=100, description="理智值 Sanity")
+    lucky: int = Field(default=50, ge=1, le=99, description="幸运值 Luck")
+
+
+# ============================================================
+# 实体模型定义
+# ============================================================
+
+class Character(BaseModel):
+    """角色实体"""
+    id: str = Field(..., description="角色唯一标识符")
+    name: str = Field(..., description="角色名称")
+    basic_info: str = Field(default="", description="基本信息/背景简介")
+    description: Description = Field(default_factory=Description, description="描述系统")
+    location: str = Field(default="", description="当前位置（地图ID或空）")
+    inventory: List[str] = Field(default_factory=list, description="背包物品ID列表")
+    status: CharacterStatus = Field(default_factory=CharacterStatus, description="角色状态")
+    attributes: CharacterAttributes = Field(default_factory=CharacterAttributes, description="角色属性")
+    memory: Memory = Field(default_factory=Memory, description="记忆系统")
+    is_player: bool = Field(default=False, description="是否为玩家控制角色")
+
+    class Config:
+        extra = "allow"  # 允许额外字段，便于扩展
+
+
+class Item(BaseModel):
+    """物品实体"""
+    id: str = Field(..., description="物品唯一标识符")
+    name: str = Field(..., description="物品名称")
+    description: Description = Field(default_factory=Description, description="描述系统")
+    location: str = Field(default="", description="位置（地图ID或角色ID）")
+    is_portable: bool = Field(default=True, description="是否可携带")
+
+    class Config:
+        extra = "allow"
+
+
+class MapNeighbor(BaseModel):
+    """地图邻居连接"""
+    id: str = Field(..., description="相邻地图ID")
+    direction: str = Field(..., description="方向（如：北、南、东、西）")
+    description: str = Field(default="", description="连接描述（如：一扇木门）")
+
+
+class MapEntities(BaseModel):
+    """地图上的实体"""
+    characters: List[str] = Field(default_factory=list, description="角色ID列表")
+    items: List[str] = Field(default_factory=list, description="物品ID列表")
+
+
+class Map(BaseModel):
+    """地图/场景实体"""
+    id: str = Field(..., description="地图唯一标识符")
+    name: str = Field(..., description="地图名称")
+    parent_id: Optional[str] = Field(default=None, description="父级区域ID")
+    description: Description = Field(default_factory=Description, description="描述系统")
+    neighbors: List[MapNeighbor] = Field(default_factory=list, description="相邻地图")
+    entities: MapEntities = Field(default_factory=MapEntities, description="地图上的实体")
+
+    class Config:
+        extra = "allow"
+
+
+# ============================================================
+# 游戏状态变更模型
+# ============================================================
+
+class ChangeOperation(str, Enum):
+    """变更操作类型"""
+    UPDATE = "update"
+    ADD = "add"
+    DELETE = "del"
+
+
+class StateChange(BaseModel):
+    """状态变更项"""
+    id: str = Field(..., description="实体ID")
+    field: str = Field(..., description="字段路径（支持点分，如attributes.hp）")
+    operation: ChangeOperation = Field(..., description="操作类型")
+    value: Any = Field(default=None, description="新值")
+
+
+# ============================================================
+# 鉴定相关模型
+# ============================================================
+
+class CheckType(str, Enum):
+    """鉴定类型"""
+    REGULAR = "非对抗鉴定"
+    OPPOSED = "对抗鉴定"
+
+
+class CheckDifficulty(str, Enum):
+    """鉴定难度"""
+    REGULAR = "常规"
+    HARD = "困难"
+    EXTREME = "极难"
+
+
+class CheckResult(str, Enum):
+    """鉴定结果等级"""
+    CRITICAL_SUCCESS = "大成功"
+    SUCCESS = "成功"
+    FAILURE = "失败"
+    FUMBLE = "大失败"
+
+
+class CheckInput(BaseModel):
+    """规则系统输入"""
+    check_type: CheckType = Field(..., description="鉴定类型")
+    attributes: List[str] = Field(..., description="使用的属性列表")
+    actor_id: str = Field(..., description="行动者ID")
+    target_id: Optional[str] = Field(default=None, description="目标ID（对抗鉴定）")
+    difficulty: CheckDifficulty = Field(default=CheckDifficulty.REGULAR, description="难度")
+
+
+class CheckOutput(BaseModel):
+    """规则系统输出"""
+    result: CheckResult = Field(..., description="鉴定结果")
+    dice_roll: int = Field(..., ge=1, le=100, description="骰子结果")
+    target_value: int = Field(..., description="目标值")
+    actor_value: int = Field(..., description="行动者实际属性值")
+    detail: str = Field(default="", description="详细说明")
+
+
+# ============================================================
+# DM Agent 输入输出模型
+# ============================================================
+
+class DMAgentInput(BaseModel):
+    """DM Agent输入"""
+    system_prompt: str = Field(..., description="系统提示词")
+    player_input: str = Field(..., description="玩家输入")
+    dialogue_history: List[str] = Field(default_factory=list, description="对话历史")
+    game_context: Dict[str, Any] = Field(default_factory=dict, description="游戏上下文")
+
+
+class DMAgentOutput(BaseModel):
+    """DM Agent输出"""
+    is_dialogue: bool = Field(default=False, description="是否为纯对话")
+    response_to_player: str = Field(default="", description="给玩家的回复")
+    needs_check: bool = Field(default=False, description="是否需要鉴定")
+    check_type: Optional[str] = Field(default=None, description="鉴定类型")
+    check_attributes: List[str] = Field(default_factory=list, description="鉴定属性")
+    check_target: Optional[str] = Field(default=None, description="对抗目标ID")
+    difficulty: str = Field(default="常规", description="非对抗鉴定难度")
+    action_description: str = Field(default="", description="行动的自然语言描述")
+
+
+# ============================================================
+# 状态推演系统模型
+# ============================================================
+
+class StateEvolutionInput(BaseModel):
+    """状态推演系统输入"""
+    system_prompt: str = Field(..., description="系统提示词")
+    end_condition: str = Field(default="", description="结局条件")
+    check_result: Optional[CheckOutput] = Field(default=None, description="鉴定结果")
+    action_description: str = Field(default="", description="行动描述")
+    game_context: Dict[str, Any] = Field(default_factory=dict, description="游戏上下文")
+    is_npc_action: bool = Field(default=False, description="是否为NPC行动")
+    npc_intent: Optional[str] = Field(default=None, description="NPC意图")
+    npc_info: Optional[Dict[str, Any]] = Field(default=None, description="NPC信息")
+
+
+class StateEvolutionOutput(BaseModel):
+    """状态推演系统输出"""
+    narrative: str = Field(..., description="生成的叙事文本")
+    changes: List[StateChange] = Field(default_factory=list, description="状态变更列表")
+    resolved: bool = Field(default=True, description="回合是否已解决")
+    next_action_hint: Optional[str] = Field(default=None, description="下轮行动提示")
+    is_end: bool = Field(default=False, description="是否游戏结束")
+    end_narrative: str = Field(default="", description="结局描述")
+
+
+# ============================================================
+# 游戏状态模型
+# ============================================================
+
+class GameState(BaseModel):
+    """游戏全局状态"""
+    characters: Dict[str, Character] = Field(default_factory=dict, description="角色字典")
+    items: Dict[str, Item] = Field(default_factory=dict, description="物品字典")
+    maps: Dict[str, Map] = Field(default_factory=dict, description="地图字典")
+    player_id: Optional[str] = Field(default=None, description="当前玩家角色ID")
+    current_scene_id: Optional[str] = Field(default=None, description="当前场景ID")
+    turn_order: List[str] = Field(default_factory=list, description="行动顺序列表（角色ID）")
+    turn_count: int = Field(default=0, description="当前回合数")
+    is_ended: bool = Field(default=False, description="游戏是否结束")
+
+    def get_player(self) -> Optional[Character]:
+        """获取玩家角色"""
+        if self.player_id:
+            return self.characters.get(self.player_id)
+        return None
+    
+    def get_current_map(self) -> Optional[Map]:
+        """获取当前地图"""
+        if self.current_scene_id:
+            return self.maps.get(self.current_scene_id)
+        return None
+
+
+# ============================================================
+# 导出所有模型
+# ============================================================
+
+__all__ = [
+    # 基础类型
+    "Description",
+    "Memory",
+    # 角色属性
+    "CharacterAttributes",
+    "CharacterStatus",
+    # 实体
+    "Character",
+    "Item",
+    "MapNeighbor",
+    "MapEntities",
+    "Map",
+    # 变更
+    "ChangeOperation",
+    "StateChange",
+    # 鉴定
+    "CheckType",
+    "CheckDifficulty",
+    "CheckResult",
+    "CheckInput",
+    "CheckOutput",
+    # DM Agent
+    "DMAgentInput",
+    "DMAgentOutput",
+    # 状态推演
+    "StateEvolutionInput",
+    "StateEvolutionOutput",
+    # 游戏状态
+    "GameState",
+]
