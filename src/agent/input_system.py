@@ -54,9 +54,13 @@ class InputSystem:
         "inventory": "查看背包",
         "pickup": "捡起物品",
         "drop": "放下物品",
+        "use": "使用物品",
+        "give": "给予物品给角色",
         "status": "查看自身状态",
         "save": "保存进度",
         "load": "加载进度",
+        "reset": "重置游戏",
+        "debug": "切换调试模式",
         "help": "显示帮助",
         "exit": "退出游戏",
     }
@@ -478,6 +482,97 @@ class InputSystem:
             description += f"【位置】{current_map.name}\n"
         
         return description, changes
+
+    def _cmd_use(
+        self,
+        args: List[str],
+        player: Character,
+        game_state: GameState
+    ) -> Tuple[str, List[StateChange]]:
+        """使用物品（基础交互，复杂效果交由自然语言流程）。"""
+        changes = []
+        if not args:
+            return "请指定要使用的物品名。用法: \\use <物品名>", changes
+
+        item_name = " ".join(args).lower()
+        for item_id in player.inventory:
+            item = game_state.items.get(item_id)
+            if item and (item_name in item.name.lower() or item_name in item_id.lower()):
+                return f"你尝试使用 {item.name}。如需复杂效果，请直接用自然语言描述行动。", changes
+
+        return f"背包中没有物品: {item_name}", changes
+
+    def _cmd_give(
+        self,
+        args: List[str],
+        player: Character,
+        game_state: GameState
+    ) -> Tuple[str, List[StateChange]]:
+        """给予物品给场景内角色，格式：\\give <物品名> to <角色名>。"""
+        changes = []
+        if not args or "to" not in [a.lower() for a in args]:
+            return "用法: \\give <物品名> to <角色名>", changes
+
+        split_idx = [a.lower() for a in args].index("to")
+        item_name = " ".join(args[:split_idx]).strip().lower()
+        target_name = " ".join(args[split_idx + 1:]).strip().lower()
+
+        if not item_name or not target_name:
+            return "用法: \\give <物品名> to <角色名>", changes
+
+        give_item_id = None
+        for item_id in player.inventory:
+            item = game_state.items.get(item_id)
+            if item and (item_name in item.name.lower() or item_name in item_id.lower()):
+                give_item_id = item_id
+                break
+
+        if not give_item_id:
+            return f"背包中没有物品: {item_name}", changes
+
+        current_map = game_state.get_current_map()
+        if not current_map:
+            return "错误：当前不在任何场景中", changes
+
+        target_char = None
+        for char_id in current_map.entities.characters:
+            if char_id == player.id:
+                continue
+            char = game_state.characters.get(char_id)
+            if char and (target_name in char.name.lower() or target_name in char_id.lower()):
+                target_char = char
+                break
+
+        if not target_char:
+            return f"未找到角色: {target_name}", changes
+
+        # 物品位置改为目标角色
+        changes.append(StateChange(
+            id=give_item_id,
+            field="location",
+            operation=ChangeOperation.UPDATE,
+            value=target_char.id
+        ))
+        # 玩家背包移除
+        new_inventory = [i for i in player.inventory if i != give_item_id]
+        changes.append(StateChange(
+            id=player.id,
+            field="inventory",
+            operation=ChangeOperation.UPDATE,
+            value=new_inventory
+        ))
+        # 目标角色背包追加
+        target_inventory = target_char.inventory + [give_item_id]
+        changes.append(StateChange(
+            id=target_char.id,
+            field="inventory",
+            operation=ChangeOperation.UPDATE,
+            value=target_inventory
+        ))
+
+        item = game_state.items.get(give_item_id)
+        item_label = item.name if item else give_item_id
+        return f"你把 {item_label} 交给了 {target_char.name}。", changes
     
     def _cmd_save(
         self,
@@ -557,10 +652,14 @@ class InputSystem:
         help_text += "物品操作类:\n"
         help_text += "  \\pickup <物品名> - 捡起物品\n"
         help_text += "  \\drop <物品名>   - 放下物品\n\n"
+        help_text += "  \\use <物品名>    - 使用物品\n"
+        help_text += "  \\give <物品名> to <角色> - 给予物品\n\n"
         
         help_text += "游戏控制类:\n"
         help_text += "  \\save [存档名]   - 保存进度\n"
         help_text += "  \\load [存档名]   - 加载进度\n"
+        help_text += "  \\reset          - 重置游戏\n"
+        help_text += "  \\debug          - 切换调试模式\n"
         help_text += "  \\help           - 显示此帮助\n"
         help_text += "  \\exit           - 退出游戏\n\n"
         
@@ -592,6 +691,27 @@ class InputSystem:
         changes = []
         
         return "EXIT_GAME", changes
+
+    def _cmd_reset(
+        self,
+        args: List[str],
+        player: Character,
+        game_state: GameState
+    ) -> Tuple[str, List[StateChange]]:
+        """请求引擎重置游戏。"""
+        return "RESET_GAME", []
+
+    def _cmd_debug(
+        self,
+        args: List[str],
+        player: Character,
+        game_state: GameState
+    ) -> Tuple[str, List[StateChange]]:
+        """基础调试开关提示。"""
+        mode = args[0].lower() if args else "on"
+        if mode not in ("on", "off"):
+            mode = "on"
+        return f"DEBUG_MODE_{mode.upper()}", []
     
     def get_help_text(self) -> str:
         """获取帮助文本"""

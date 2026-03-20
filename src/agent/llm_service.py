@@ -21,6 +21,7 @@ import logging
 from typing import List, Dict, Optional, Any, Iterator, Union
 from dataclasses import dataclass
 from functools import wraps
+from pathlib import Path
 
 # 尝试导入OpenAI库
 try:
@@ -85,16 +86,52 @@ class LLMConfig:
     timeout: float = 60.0
     
     @classmethod
-    def from_env(cls) -> "LLMConfig":###改为使用在config文件中的llm.json文件进行配置,还包括模型,以及温度等模型参数
-        """从环境变量创建配置"""
-        api_key = os.getenv("LLM_API_KEY")
+    def from_sources(cls, config_path: str = "config/llm.json") -> "LLMConfig":
+        """从配置文件和环境变量加载配置。
+
+        优先级：
+        1. 环境变量（便于部署覆盖）
+        2. config/llm.json
+        3. 默认值
+        """
+        file_data: Dict[str, Any] = {}
+        path = Path(config_path)
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                file_data = json.load(f)
+
+        api_key = os.getenv("LLM_API_KEY") or file_data.get("api_key")
         if not api_key:
-            raise LLMConfigError("未设置环境变量 LLM_API_KEY")
-        
+            raise LLMConfigError("未配置API Key，请设置 LLM_API_KEY 或 config/llm.json 中的 api_key")
+
+        base_url = os.getenv("LLM_BASE_URL") or file_data.get("base_url")
+        model = os.getenv("LLM_MODEL") or file_data.get("model", "gpt-3.5-turbo")
+
+        temperature_env = os.getenv("LLM_TEMPERATURE")
+        if temperature_env is not None:
+            temperature = float(temperature_env)
+        else:
+            temperature = float(file_data.get("temperature", 0.7))
+
+        max_tokens_env = os.getenv("LLM_MAX_TOKENS")
+        if max_tokens_env is not None:
+            max_tokens = int(max_tokens_env)
+        else:
+            max_tokens = file_data.get("max_tokens")
+
+        timeout_env = os.getenv("LLM_TIMEOUT")
+        if timeout_env is not None:
+            timeout = float(timeout_env)
+        else:
+            timeout = float(file_data.get("timeout", 60.0))
+
         return cls(
             api_key=api_key,
-            base_url=os.getenv("LLM_BASE_URL"),
-            model=os.getenv("LLM_MODEL", "gpt-3.5-turbo"),
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
         )
 
 
@@ -195,7 +232,7 @@ class LLMService:
                 "未安装openai库，请运行: pip install openai"
             )
         
-        self.config = config or LLMConfig.from_env()
+        self.config = config or LLMConfig.from_sources()
         
         # 初始化OpenAI客户端
         client_kwargs = {"api_key": self.config.api_key}

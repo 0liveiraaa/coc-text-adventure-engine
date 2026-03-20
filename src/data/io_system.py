@@ -439,6 +439,10 @@ class IOSystem:
             error_codes.append(error_code)
         
         return error_codes
+
+    def apply_state_change(self, change: StateChange) -> int:
+        """应用单个变更（兼容引擎单条调用）。"""
+        return self._apply_single_change(change)
     
     def _apply_single_change(self, change: StateChange) -> int:
         """应用单个变更"""

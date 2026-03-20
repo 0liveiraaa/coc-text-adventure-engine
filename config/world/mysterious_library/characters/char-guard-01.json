@@ -1,0 +1,38 @@
+{
+  "id": "char-guard-01",
+  "name": "老守卫",
+  "basic_info": "图书馆的夜班守卫，在这里工作了二十年",
+  "description": {
+    "public": [
+      {
+        "description": "一位头发花白的老人，穿着褪色的守卫制服，眼神中带着疲惫和警惕"
+      }
+    ],
+    "hint": "他对年轻人格外警惕，但如果玩家表现出尊重，他可能会提供有用的信息。他口袋里有一把铜钥匙。"
+  },
+  "location": "map-room-library-01",
+  "inventory": [
+    "item-key-01"
+  ],
+  "status": {
+    "hp": 10,
+    "max_hp": 10,
+    "san": 45,
+    "lucky": 40
+  },
+  "attributes": {
+    "str": 11,
+    "con": 12,
+    "siz": 13,
+    "dex": 10,
+    "app": 9,
+    "int": 11,
+    "pow": 12,
+    "edu": 10
+  },
+  "memory": {
+    "current_event": "",
+    "log": []
+  },
+  "is_player": false
+}

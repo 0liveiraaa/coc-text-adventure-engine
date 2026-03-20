@@ -358,17 +358,27 @@ class GameCLI:
     提供完整的命令行交互界面
     """
     
-    def __init__(self, use_colors: bool = True):
+    def __init__(self, game_engine=None, use_colors: bool = True):
         """
         初始化CLI
         
         Args:
+            game_engine: 游戏引擎实例（可选）
             use_colors: 是否使用颜色
         """
         self.display = DisplayManager(use_colors)
         self.input_handler = InputHandler()
         self.running = False
+        self.game_engine = game_engine
         logger.info("CLI前端初始化完成")
+
+    def run(self):
+        """启动CLI。"""
+        if self.game_engine is None:
+            raise ValueError("GameCLI.run 需要可用的 game_engine")
+
+        self.show_welcome()
+        self.start_game_loop(self.game_engine)
     
     def show_welcome(self):
         """显示欢迎界面"""
@@ -510,7 +520,7 @@ class GameCLI:
 # 便捷函数
 # ============================================================
 
-def create_cli(use_colors: bool = True) -> GameCLI:
+def create_cli(game_engine=None, use_colors: bool = True) -> GameCLI:
     """
     创建CLI实例
     
@@ -520,7 +530,7 @@ def create_cli(use_colors: bool = True) -> GameCLI:
     Returns:
         GameCLI实例
     """
-    return GameCLI(use_colors)
+    return GameCLI(game_engine=game_engine, use_colors=use_colors)
 
 
 # 导出

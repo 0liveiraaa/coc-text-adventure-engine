@@ -10,19 +10,20 @@ Game Engine核心模块 - 游戏引擎主类
 """
 
 import logging
+import json
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 
 from src.data.io_system import IOSystem
 from src.data.models import (
     Character, Item, Map, GameState, StateChange, ChangeOperation,
-    DMAgentInput, DMAgentOutput, CheckInput, CheckOutput,
-    StateEvolutionInput, StateEvolutionOutput,
+    DMAgentOutput, CheckInput, CheckOutput,
+    StateEvolutionOutput,
     CheckType, CheckDifficulty
 )
 from src.agent.input_system import InputSystem, InputResult, InputType
 from src.agent.dm_agent import DMAgent
-from src.agent.state_evolution import StateEvolutionAgent
+from src.agent.state_evolution import StateEvolution as StateEvolutionAgent
 from src.agent.prompt import load_system_prompt, load_state_evolution_prompt
 from src.rule.rule_system import RuleSystem
 
@@ -78,8 +79,10 @@ class GameEngine:
         self._action_queue: List[str] = []  # 可行动角色队列
         self._current_actor_id: Optional[str] = None  # 当前行动角色
         
-        # 配置
-        self.end_condition = "玩家死亡或达成剧情结局" #应该读取config/world文件里的设定而非在此处设定
+        # 世界配置（可被外部加载器覆盖）
+        self.world_name = "default"
+        self.end_condition = "玩家死亡或达成剧情结局"
+        self._ending_rules: List[Dict[str, Any]] = []
         
         # 加载提示词
         self._system_prompt = load_system_prompt()
@@ -210,6 +213,14 @@ class GameEngine:
                 player_name = player.name
         
         self.new_game(player_name)
+
+    def apply_world_settings(self, world_name: str, end_condition: str):
+        """应用世界级配置（例如来自world.json）。"""
+        self.world_name = world_name
+        self.end_condition = end_condition or self.end_condition
+        # 让状态推演系统共享同一结局条件
+        self.state_agent.end_condition = self.end_condition
+        self._load_ending_rules()
     
     # ============================================================
     # 核心游戏循环
@@ -257,12 +268,41 @@ class GameEngine:
                         input_result.args or [],
                         self.game_state
                     )
+
+                    # 处理需要引擎执行的系统命令
+                    if input_result.command == "save":
+                        save_name = input_result.args[0] if input_result.args else "auto_save"
+                        ok = self.save_game(save_name)
+                        cmd_result.direct_response = f"游戏进度已保存: {save_name}" if ok else f"保存失败: {save_name}"
+
+                    if input_result.command == "load":
+                        save_name = input_result.args[0] if input_result.args else "auto_save"
+                        ok = self.load_game(save_name)
+                        cmd_result.direct_response = f"加载存档成功: {save_name}" if ok else f"加载存档失败: {save_name}"
                     
                     # 检查退出指令
                     if cmd_result.direct_response == "EXIT_GAME":
                         result["response"] = "游戏已退出"
                         result["game_over"] = True
                         self._is_game_over = True
+                        return result
+
+                    if cmd_result.direct_response == "RESET_GAME":
+                        self.restart()
+                        result["response"] = "游戏已重置并重新开始"
+                        self._turn_end(resolved=True)
+                        return result
+
+                    if cmd_result.direct_response == "DEBUG_MODE_ON":
+                        logging.getLogger().setLevel(logging.DEBUG)
+                        result["response"] = "调试模式已开启"
+                        self._turn_end(resolved=True)
+                        return result
+
+                    if cmd_result.direct_response == "DEBUG_MODE_OFF":
+                        logging.getLogger().setLevel(logging.INFO)
+                        result["response"] = "调试模式已关闭"
+                        self._turn_end(resolved=True)
                         return result
                     
                     # 应用基础指令产生的变更
@@ -322,7 +362,13 @@ class GameEngine:
                 player.memory.current_event = evolution_result.narrative
             
             # 检查游戏结束
-            if evolution_result.is_end:
+            config_ending_text = self._evaluate_configured_endings()
+            if config_ending_text:
+                self._is_game_over = True
+                self._ending_text = config_ending_text
+                result["game_over"] = True
+                result["narrative"] += f"\n\n{self._ending_text}"
+            elif evolution_result.is_end:
                 self._is_game_over = True
                 self._ending_text = evolution_result.end_narrative
                 result["game_over"] = True
@@ -340,7 +386,8 @@ class GameEngine:
     
     def _turn_start(self):
         """回合开始 - Step 1"""
-        # 清空所有角色的current_event
+        # 通过IO层统一清空事件并入log，保持内存与持久层一致
+        self.io.clear_current_events()
         for char in self.game_state.characters.values():
             char.memory.clear_current()
         
@@ -366,15 +413,11 @@ class GameEngine:
         Returns:
             DM Agent输出
         """
-        # 构建DM Agent输入
-        dm_input = DMAgentInput(
-            system_prompt=self._build_system_prompt(),
+        # 调用DM Agent（由DM内部构建上下文）
+        dm_output = self.dm_agent.parse_intent(
             player_input=player_input,
-            game_context=self._build_game_context()
+            game_state=self.game_state
         )
-        
-        # 调用DM Agent
-        dm_output = self.dm_agent.parse_intent(dm_input)
         
         logger.debug(f"DM Agent解析结果: needs_check={dm_output.needs_check}")
         return dm_output
@@ -434,19 +477,12 @@ class GameEngine:
         Returns:
             状态推演结果
         """
-        # 构建状态推演输入
-        state_input = StateEvolutionInput(
-            system_prompt=self._state_evolution_prompt,
-            end_condition=self.end_condition,
+        # 调用状态推演
+        evolution_output = self.state_agent.evolve_player_action(
             check_result=check_result,
             action_description=dm_output.action_description,
-            game_context=self._build_game_context()
-        )
-        
-        # 调用状态推演
-        evolution_output = self.state_agent.evolve_state(
-            state_input,
-            self.game_state
+            game_state=self.game_state,
+            additional_context={"engine_context": self._build_game_context()}
         )
         
         logger.debug(f"状态推演完成，变更数: {len(evolution_output.changes)}")
@@ -571,14 +607,143 @@ class GameEngine:
     
     def _build_game_context(self) -> Dict[str, Any]:
         """构建游戏上下文"""
+        current_map = self.game_state.get_current_map()
+        player = self.game_state.get_player()
+
+        nearby_characters: List[Dict[str, Any]] = []
+        nearby_items: List[Dict[str, Any]] = []
+
+        if current_map:
+            for char_id in current_map.entities.characters:
+                char = self.game_state.characters.get(char_id)
+                if char and char.id != self.game_state.player_id:
+                    nearby_characters.append({
+                        "id": char.id,
+                        "name": char.name,
+                        "basic_info": char.basic_info,
+                        "location": char.location,
+                    })
+
+            for item_id in current_map.entities.items:
+                item = self.game_state.items.get(item_id)
+                if item:
+                    nearby_items.append({
+                        "id": item.id,
+                        "name": item.name,
+                        "location": item.location,
+                    })
+
         return {
             "turn_count": self.game_state.turn_count,
             "player_id": self.game_state.player_id,
             "current_scene_id": self.game_state.current_scene_id,
-            "characters_count": len(self.game_state.characters),
-            "items_count": len(self.game_state.items),
-            "maps_count": len(self.game_state.maps),
+            "current_location": {
+                "id": current_map.id,
+                "name": current_map.name,
+                "description": current_map.description.get_public_text(),
+            } if current_map else None,
+            "nearby_characters": nearby_characters,
+            "nearby_items": nearby_items,
+            "player_status": {
+                "hp": player.status.hp,
+                "max_hp": player.status.max_hp,
+                "san": player.status.san,
+                "lucky": player.status.lucky,
+            } if player else None,
         }
+
+    def _load_ending_rules(self):
+        """加载世界配置中的结局规则。"""
+        endings_dir = Path("config/world") / self.world_name / "endings"
+        self._ending_rules = []
+
+        if not endings_dir.exists() or not endings_dir.is_dir():
+            return
+
+        for ending_file in sorted(endings_dir.glob("*.json")):
+            try:
+                with open(ending_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self._ending_rules.append(data)
+            except Exception as e:
+                logger.warning(f"读取结局配置失败: {ending_file}, {e}")
+
+        self._ending_rules.sort(key=lambda x: x.get("priority", 0), reverse=True)
+
+    def _evaluate_configured_endings(self) -> str:
+        """评估配置结局，命中返回结局文本，否则返回空字符串。"""
+        if not self._ending_rules:
+            return ""
+
+        for ending in self._ending_rules:
+            condition_expr = str(ending.get("condition_expr", "")).strip()
+            if not condition_expr:
+                continue
+
+            if self._evaluate_condition_expr(condition_expr):
+                return str(ending.get("end_narrative", "")).strip()
+
+        return ""
+
+    def _evaluate_condition_expr(self, expr: str) -> bool:
+        """评估简易结局表达式。"""
+        player = self.game_state.get_player()
+        if not player:
+            return False
+
+        # all(a,b,c)
+        if expr.startswith("all(") and expr.endswith(")"):
+            args = self._split_expr_args(expr[4:-1])
+            return all(self._evaluate_condition_expr(a) for a in args)
+
+        # any(a,b,c)
+        if expr.startswith("any(") and expr.endswith(")"):
+            args = self._split_expr_args(expr[4:-1])
+            return any(self._evaluate_condition_expr(a) for a in args)
+
+        # 基础内置条件
+        if expr == "player_hp_le_0":
+            return player.status.hp <= 0
+        if expr == "player_san_le_0":
+            return player.status.san <= 0
+
+        if expr.startswith("player_at:"):
+            map_id = expr.split(":", 1)[1].strip()
+            return player.location == map_id
+
+        if expr.startswith("has_item:"):
+            item_id = expr.split(":", 1)[1].strip()
+            return item_id in player.inventory
+
+        return False
+
+    def _split_expr_args(self, raw: str) -> List[str]:
+        """按最外层逗号拆分表达式参数。"""
+        args: List[str] = []
+        depth = 0
+        buf: List[str] = []
+
+        for ch in raw:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(0, depth - 1)
+
+            if ch == "," and depth == 0:
+                part = "".join(buf).strip()
+                if part:
+                    args.append(part)
+                buf = []
+                continue
+
+            buf.append(ch)
+
+        tail = "".join(buf).strip()
+        if tail:
+            args.append(tail)
+
+        return args
     
     def _create_default_world(self, player_name: str):
         """创建默认游戏世界"""

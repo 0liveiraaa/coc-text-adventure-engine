@@ -64,7 +64,8 @@ def determine_result(dice_roll: int, target_value: int) -> CheckResult:
         CheckResult: 鉴定结果等级
     """
     # 大成功判定
-    critical_threshold = min(1, target_value // 5)
+    # COC常用写法：至少保留1点大成功阈值，技能高时扩展到1/5
+    critical_threshold = max(1, target_value // 5)
     if dice_roll == 1 or dice_roll <= critical_threshold:
         return CheckResult.CRITICAL_SUCCESS
     
@@ -424,3 +425,22 @@ def perform_check(
         return perform_opposed_check(check_input, actor, target)
     else:
         raise ValueError(f"未知的鉴定类型: {check_input.check_type}")
+
+
+class RuleSystem:
+    """规则系统门面类，供引擎统一调用。"""
+
+    def execute_check(self, check_input: CheckInput, game_state) -> CheckOutput:
+        actor = game_state.characters.get(check_input.actor_id)
+        if not actor:
+            raise ValueError(f"行动者不存在: {check_input.actor_id}")
+
+        target = None
+        if check_input.check_type == CheckType.OPPOSED:
+            if not check_input.target_id:
+                raise ValueError("对抗鉴定缺少target_id")
+            target = game_state.characters.get(check_input.target_id)
+            if not target:
+                raise ValueError(f"对抗目标不存在: {check_input.target_id}")
+
+        return perform_check(check_input, actor, target)

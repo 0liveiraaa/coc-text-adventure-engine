@@ -1,0 +1,29 @@
+{
+  "id": "map-room-library-01",
+  "name": "图书馆主厅",
+  "parent_id": "map-area-library",
+  "description": {
+    "public": [
+      {
+        "description": "一个宽敞而古老的房间，四周摆满了高耸的书架，书架上堆满了尘封的典籍。中央是一张巨大的橡木阅读桌，桌上点着一盏昏暗的台灯。空气中弥漫着纸张和木头的陈旧气息。"
+      }
+    ],
+    "hint": "东侧书架后有一道暗门，通向地下密室。暗门的开关隐藏在第三排书架的某本书后面。"
+  },
+  "neighbors": [
+    {
+      "id": "map-room-corridor-01",
+      "direction": "北",
+      "description": "一扇通往走廊的木门"
+    }
+  ],
+  "entities": {
+    "characters": [
+      "char-guard-01"
+    ],
+    "items": [
+      "item-book-01",
+      "item-lantern-01"
+    ]
+  }
+}

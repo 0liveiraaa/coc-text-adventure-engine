@@ -1,0 +1,12 @@
+{
+  "world_id": "world-mysterious-library",
+  "world_name": "mysterious_library",
+  "player_id": "char-player-01",
+  "start_map_id": "map-room-library-01",
+  "turn_order": [
+    "char-player-01",
+    "char-guard-01"
+  ],
+  "end_condition": "当玩家死亡，或在地下密室找到关键真相并成功离开时结束游戏。",
+  "entry_scene_narrative": "深夜，你踏入了神秘图书馆，潮湿的纸张气味与不安同时袭来。"
+}

@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.data.io_system import IOSystem
-from src.data.init.world_loader import load_initial_world
+from src.data.init.world_loader import load_initial_world_bundle
 from src.engine.game_engine import GameEngine
 from src.cli.game_cli import GameCLI
 
@@ -91,6 +91,13 @@ def parse_arguments():
         "--scenario", "-s",
         type=str,
         help="指定剧本/场景ID（可选）"
+    )
+
+    parser.add_argument(
+        "--world", "-w",
+        type=str,
+        default="mysterious_library",
+        help="指定世界配置目录名（位于 config/world/<world_name>）"
     )
     
     parser.add_argument(
@@ -165,14 +172,22 @@ def _start_new_game(engine: GameEngine, args):
     
     # 从配置文件加载世界数据
     try:
-        game_state = load_initial_world(engine.io, player_name=args.name)
-        engine.game_state = game_state
+        bundle = load_initial_world_bundle(
+            engine.io,
+            player_name=args.name,
+            world_name=args.world
+        )
+        engine.game_state = bundle.game_state
+        engine.apply_world_settings(
+            world_name=bundle.world_name,
+            end_condition=bundle.end_condition
+        )
         
         # 更新游戏状态的其他设置
         engine.game_state.turn_count = 1
         engine._is_game_over = False
         
-        logger.info("世界数据加载成功")
+        logger.info(f"世界数据加载成功: {bundle.world_name}")
         
     except Exception as e:
         logger.error(f"从配置加载世界数据失败: {e}")

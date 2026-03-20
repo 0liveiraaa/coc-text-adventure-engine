@@ -3,6 +3,7 @@ COC文字冒险游戏框架 - 数据模型定义
 基于Pydantic的类型安全数据模型
 """
 
+import builtins
 from typing import List, Dict, Optional, Any, Union
 from pydantic import BaseModel, Field
 from enum import Enum
@@ -50,14 +51,14 @@ class Memory(BaseModel):
 
 class CharacterAttributes(BaseModel):
     """COC角色属性（七大主属性）"""
-    str: int = Field(default=10, ge=1, le=99, description="力量 STRENGTH")
-    con: int = Field(default=10, ge=1, le=99, description="体质 CONSTITUTION")
-    siz: int = Field(default=10, ge=1, le=99, description="体型 SIZE")
-    dex: int = Field(default=10, ge=1, le=99, description="敏捷 DEXTERITY")
-    app: int = Field(default=10, ge=1, le=99, description="外貌 APPEARANCE")
-    int: int = Field(default=10, ge=1, le=99, description="智力 INTELLIGENCE")
-    pow: int = Field(default=10, ge=1, le=99, description="意志 POWER")
-    edu: int = Field(default=10, ge=1, le=99, description="教育 EDUCATION")
+    str: builtins.int = Field(default=10, ge=1, le=99, description="力量 STRENGTH")
+    con: builtins.int = Field(default=10, ge=1, le=99, description="体质 CONSTITUTION")
+    siz: builtins.int = Field(default=10, ge=1, le=99, description="体型 SIZE")
+    dex: builtins.int = Field(default=10, ge=1, le=99, description="敏捷 DEXTERITY")
+    app: builtins.int = Field(default=10, ge=1, le=99, description="外貌 APPEARANCE")
+    int: builtins.int = Field(default=10, ge=1, le=99, description="智力 INTELLIGENCE")
+    pow: builtins.int = Field(default=10, ge=1, le=99, description="意志 POWER")
+    edu: builtins.int = Field(default=10, ge=1, le=99, description="教育 EDUCATION")
 
 
 class CharacterStatus(BaseModel):
