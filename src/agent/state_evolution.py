@@ -83,6 +83,10 @@ STATE_EVOLUTION_OUTPUT_SCHEMA = {
         "end_narrative": {
             "type": "string",
             "description": "结局描述，当is_end为true时使用"
+        },
+        "erro":{
+            "type":"string",
+            "description":"报错信息输出错误时返回给llm,使其纠正错误"  #修改建议:这是我新增的输入字段,记得改相关的上下游代码,使其能够正确输入
         }
     },
     "required": ["narrative", "changes", "resolved", "is_end"]
@@ -159,7 +163,7 @@ class StateEvolution:
         except FileNotFoundError:
             logger.error(f"状态推演提示词文件不存在: {prompt_path}")
             return self._get_fallback_system_prompt()
-    
+    #修改建议:删除
     def _get_fallback_system_prompt(self) -> str:
         """
         获取备用系统提示词（当文件不存在时使用）
@@ -465,6 +469,7 @@ class StateEvolution:
             npc_id: NPC角色ID
             npc_intent: NPC意图
             game_context: 游戏上下文
+            修改建议:新增一个erro字段,用以读取系统报错,同时记得修改相关提示词,使其能够理解报错信息
         
         Returns:
             完整的提示词文本

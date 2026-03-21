@@ -145,7 +145,7 @@ class DMAgent:
         
         Returns:
             系统提示词内容
-        """
+        """#修改建议:使用统一接口,如果读取失败直接报错,不要搞多余的接口,多余的冗余,容易成屎山代码
         try:
             # 从prompt模块加载
             from src.agent.prompt import load_system_prompt
@@ -163,7 +163,7 @@ class DMAgent:
             # 返回一个基本的备用提示词
             return self._get_fallback_system_prompt()
     
-    def _get_fallback_system_prompt(self) -> str:
+    def _get_fallback_system_prompt(self) -> str:#修改建议:无用降级策略,就算你读了备用提示词游戏就能正常游玩吗?,鉴定为直接删除,改为终止并报错
         """
         获取备用系统提示词（当文件不存在时使用）
         
