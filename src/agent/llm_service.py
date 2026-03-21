@@ -340,70 +340,86 @@ class LLMService:
                 "error": Optional[str]
             }
         """
-        # 构造JSON格式提示词
-        json_instruction = (
-            f"请根据以下JSON Schema格式返回响应:\n"
-            f"{json.dumps(schema, indent=2, ensure_ascii=False)}\n\n"
-            f"要求：\n"
-            f"1. 只返回JSON对象，不要包含其他文本\n"
-            f"2. 确保返回的JSON符合上述Schema\n"
-            f"3. 不要添加markdown代码块标记\n\n"
-            f"用户请求：{prompt}"
-        )
-        
-        # 尝试使用原生JSON模式
-        try:
-            result = self.call_llm(
-                json_instruction,
-                response_format={"type": "json_object"},
-                max_retries=max_retries,
-                **kwargs
+        attempts = max(1, max_retries)
+        previous_error = ""
+        last_result: Dict[str, Any] = {
+            "success": False,
+            "data": None,
+            "content": "",
+            "model": "",
+            "error": "未知错误",
+        }
+
+        for attempt in range(1, attempts + 1):
+            correction_hint = ""
+            if previous_error:
+                correction_hint = (
+                    "\n\n上一次输出存在错误，请严格修正：\n"
+                    f"- 错误信息: {previous_error}\n"
+                    "请仅输出一个合法JSON对象，不要输出解释文本。"
+                )
+
+            json_instruction = (
+                f"请根据以下JSON Schema格式返回响应:\n"
+                f"{json.dumps(schema, indent=2, ensure_ascii=False)}\n\n"
+                f"要求：\n"
+                f"1. 只返回JSON对象，不要包含其他文本\n"
+                f"2. 确保返回的JSON符合上述Schema\n"
+                f"3. 不要添加markdown代码块标记\n"
+                f"4. 字段名必须准确，缺失字段请补齐\n"
+                f"用户请求：{prompt}"
+                f"{correction_hint}"
             )
-        except Exception:
-            # 如果原生JSON模式失败，回退到普通模式
-            result = self.call_llm(
-                json_instruction,
-                max_retries=max_retries,
-                **kwargs
-            )
-        
-        if not result["success"]:
-            return {
-                "success": False,
-                "data": None,
-                "content": result.get("content", ""),
-                "model": result.get("model", ""),
-                "error": result.get("error", "未知错误"),
-            }
-        
-        # 解析JSON响应
-        try:
-            content = result["content"]
-            
-            # 清理可能的markdown代码块
-            content = self._clean_json_content(content)
-            
-            # 解析JSON
-            data = json.loads(content)
-            
-            return {
-                "success": True,
-                "data": data,
-                "content": content,
-                "model": result["model"],
-                "error": None,
-            }
-            
-        except json.JSONDecodeError as e:
-            error_msg = f"JSON解析失败: {str(e)}"
-            logger.error(f"{error_msg}, 原始内容: {result.get('content', '')}")
-            return {
-                "success": False,
-                "data": None,
-                "content": result.get("content", ""),
-                "model": result.get("model", ""),
-                "error": error_msg,
-            }
+
+            try:
+                result = self.call_llm(
+                    json_instruction,
+                    response_format={"type": "json_object"},
+                    max_retries=max_retries,
+                    **kwargs
+                )
+            except Exception:
+                result = self.call_llm(
+                    json_instruction,
+                    max_retries=max_retries,
+                    **kwargs
+                )
+
+            if not result.get("success"):
+                previous_error = result.get("error", "未知错误")
+                last_result = {
+                    "success": False,
+                    "data": None,
+                    "content": result.get("content", ""),
+                    "model": result.get("model", ""),
+                    "error": previous_error,
+                }
+                logger.warning(f"JSON调用失败，第{attempt}/{attempts}次: {previous_error}")
+                continue
+
+            content = self._clean_json_content(result.get("content", ""))
+
+            try:
+                data = json.loads(content)
+                return {
+                    "success": True,
+                    "data": data,
+                    "content": content,
+                    "model": result.get("model", ""),
+                    "error": None,
+                }
+            except json.JSONDecodeError as e:
+                previous_error = f"JSON解析失败: {str(e)}"
+                logger.warning(f"{previous_error}，第{attempt}/{attempts}次，原始内容: {result.get('content', '')}")
+                last_result = {
+                    "success": False,
+                    "data": None,
+                    "content": result.get("content", ""),
+                    "model": result.get("model", ""),
+                    "error": previous_error,
+                }
+
+        return last_result
     
     @retry_with_backoff(max_retries=3)
     def chat_completion(

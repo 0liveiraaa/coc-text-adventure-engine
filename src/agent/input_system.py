@@ -96,6 +96,12 @@ class InputSystem:
         # 检查是否为基础指令（以\开头）
         if user_input.startswith("\\"):
             return self._parse_command(user_input[1:])
+
+        # 兼容 /help 这类输入：若是已知命令则按基础指令处理
+        if user_input.startswith("/"):
+            maybe = self._parse_command(user_input[1:])
+            if maybe.command in self.BASIC_COMMANDS:
+                return maybe
         
         # 自然语言输入
         return InputResult(

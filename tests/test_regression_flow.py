@@ -2,7 +2,8 @@ import unittest
 
 from src.data.io_system import ERROR_SUCCESS
 from src.data.init.world_loader import load_initial_world_bundle
-from src.data.models import DMAgentOutput, StateEvolutionOutput, GameState
+from src.data.models import DMAgentOutput, StateEvolutionOutput, GameState, StateChange, ChangeOperation
+from src.agent.input_system import InputSystem, InputType
 from src.engine.game_engine import GameEngine
 
 
@@ -54,6 +55,28 @@ class DummyStateAgent:
         )
 
 
+class AliasIdStateAgent:
+    def __init__(self):
+        self.end_condition = ""
+
+    def evolve_player_action(self, check_result, action_description, game_state, additional_context=None):
+        return StateEvolutionOutput(
+            narrative="你拿起了煤油灯。",
+            changes=[
+                StateChange(
+                    id="player_001",
+                    field="inventory",
+                    operation=ChangeOperation.UPDATE,
+                    value=["item-lantern-01"],
+                )
+            ],
+            resolved=True,
+            next_action_hint=None,
+            is_end=False,
+            end_narrative="",
+        )
+
+
 class RegressionFlowTests(unittest.TestCase):
     def test_world_bundle_loader_with_split_files(self):
         bundle = load_initial_world_bundle(FakeIO(), player_name="测试者", world_name="mysterious_library")
@@ -82,6 +105,30 @@ class RegressionFlowTests(unittest.TestCase):
         result = engine.process_input("我什么也不做")
         self.assertTrue(result["game_over"])
         self.assertIn("图书馆重新归于沉寂", result.get("narrative") or "")
+
+    def test_alias_player_id_change_is_normalized(self):
+        bundle = load_initial_world_bundle(FakeIO(), player_name="测试者", world_name="mysterious_library")
+
+        engine = GameEngine(
+            io_system=FakeIO(),
+            dm_agent=DummyDMAgent(),
+            state_agent=AliasIdStateAgent(),
+        )
+        engine.game_state = bundle.game_state
+        engine.apply_world_settings(bundle.world_name, bundle.end_condition)
+
+        result = engine.process_input("拿起煤油灯")
+        self.assertTrue(result["success"])
+
+        player = engine.game_state.get_player()
+        self.assertIsNotNone(player)
+        self.assertIn("item-lantern-01", player.inventory)
+
+    def test_slash_help_is_treated_as_command(self):
+        parser = InputSystem(FakeIO())
+        parsed = parser.parse_input("/help")
+        self.assertEqual(parsed.input_type, InputType.BASIC_COMMAND)
+        self.assertEqual(parsed.command, "help")
 
 
 if __name__ == "__main__":

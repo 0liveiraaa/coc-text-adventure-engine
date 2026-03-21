@@ -174,8 +174,8 @@ def _start_new_game(engine: GameEngine, args):
     try:
         bundle = load_initial_world_bundle(
             engine.io,
-            player_name=args.name,
-            world_name=args.world
+            player_name=args.name,#修改建议: 玩家信息应该使用配置文件中被标记为Player的json文件来确定,如果要进行修改应提供一个接口对接修改json文件再读取,不要提供两个入口决定玩家信息防止冲突
+            world_name=args.world#
         )
         engine.game_state = bundle.game_state
         engine.apply_world_settings(
@@ -189,7 +189,7 @@ def _start_new_game(engine: GameEngine, args):
         
         logger.info(f"世界数据加载成功: {bundle.world_name}")
         
-    except Exception as e:
+    except Exception as e: #修改建议: 职责不清,应该使用统一接口开始游戏
         logger.error(f"从配置加载世界数据失败: {e}")
         logger.info("使用默认设置创建游戏世界...")
         

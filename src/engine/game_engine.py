@@ -11,6 +11,7 @@ Game Engine核心模块 - 游戏引擎主类
 
 import logging
 import json
+import re
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 
@@ -85,7 +86,7 @@ class GameEngine:
         self._ending_rules: List[Dict[str, Any]] = []
         
         # 加载提示词
-        self._system_prompt = load_system_prompt()
+        self._system_prompt = load_system_prompt() #修改建议: 修改一下名字这是dmagent的提示词而非全局使用的系统提示词,此外提示词应该交由各个agent实例管理而非让gameEgine管理
         self._state_evolution_prompt = load_state_evolution_prompt()
         
         logger.info("游戏引擎初始化完成")
@@ -123,7 +124,7 @@ class GameEngine:
                 self._load_scenario(scenario_id)
             else:
                 # 创建默认场景和角色
-                self._create_default_world(player_name)
+                self._create_default_world(player_name) #修改建议:删掉,不要在game_engine里用两个接口创建世界,全部走配置表单这一单一接口,如果你要搞默认世界,就写个默认世界配置表单在world文件夹里面,然后走同一个接口创建世界
             
             # 初始化回合
             self.game_state.turn_count = 1
@@ -311,7 +312,7 @@ class GameEngine:
                     
                     result["response"] = cmd_result.direct_response
                     
-                    # ===== Step 7: 回合结束 =====
+                    # ===== Step 7: 回合结束 =====  #对于玩家回合,玩家输入系统指令之后不应该回合结束而是玩家继续行动,所以这里要进行控制流的修改建议
                     self._turn_end(resolved=True)
                     return result
                 else:
@@ -328,7 +329,7 @@ class GameEngine:
             if dm_output.is_dialogue:
                 result["response"] = dm_output.response_to_player
                 
-                # 记录到玩家记忆
+                #修改建议: 记录到dmagent的对话日志而非玩家记忆,如果你的dmagent类里面没有创建就创建一个,同时每个存档应该有一个dmagent_log.mdjson存储dmagent与玩家的对话记录,每一轮对话记录应该有玩家的输入和系统的回复,同理回合也不应该结束,回合结束应该是玩家发起了了一轮会修改游戏状态的交互才结束
                 player = self.game_state.get_player()
                 if player:
                     player.memory.current_event = dm_output.response_to_player
@@ -361,7 +362,7 @@ class GameEngine:
             if player:
                 player.memory.current_event = evolution_result.narrative
             
-            # 检查游戏结束
+            # 检查游戏结束 修改建议: 查看一下state_agent有没有能力确定是否到达结局:1.输入中是否有结局条件 2.能否输出结局文本和含有是否结局得标识符 现在目前得使用代码进行判断决定是否结局的方式应该是保证措施,也即首先check is_end是否为true如果不为true使用该系统再确定一下是否真的是false,如果真的是就继续游戏,如果不是就调用默认的结局文本,并终止游戏,如果is_end为true那么就直接输出结局文本(来自状态推演系统的),并终止游戏,所以现在主要依靠状态推演系统判断是否结局,使用代码判断来保底 
             config_ending_text = self._evaluate_configured_endings()
             if config_ending_text:
                 self._is_game_over = True
@@ -496,15 +497,53 @@ class GameEngine:
             changes: 变更列表
         """
         for change in changes:
-            error_code = self.io.apply_state_change(change)
+            normalized_change = self._normalize_state_change(change)
+            error_code = self.io.apply_state_change(normalized_change)
             
             if error_code == 0:
-                logger.debug(f"变更应用成功: {change.id}.{change.field}")
+                logger.debug(f"变更应用成功: {normalized_change.id}.{normalized_change.field}")
                 
                 # 同步更新内存中的游戏状态
-                self._sync_state_change(change)
+                self._sync_state_change(normalized_change)
             else:
-                logger.warning(f"变更应用失败: {change.id}.{change.field}, 错误码: {error_code}")
+                logger.warning(f"变更应用失败: {normalized_change.id}.{normalized_change.field}, 错误码: {error_code}")
+
+    def _normalize_state_change(self, change: StateChange) -> StateChange:
+        """对LLM产出的变更做ID容错，避免因格式差异导致变更丢失。"""
+        resolved_id = self._resolve_entity_id(change.id)
+        if resolved_id == change.id:
+            return change
+
+        logger.info(f"变更ID已自动纠正: {change.id} -> {resolved_id}")
+        return StateChange(
+            id=resolved_id,
+            field=change.field,
+            operation=change.operation,
+            value=change.value,
+        )
+
+    def _resolve_entity_id(self, raw_id: str) -> str:
+        """将近似ID映射到当前游戏中的真实实体ID。"""
+        all_ids = set(self.game_state.characters.keys()) | set(self.game_state.items.keys()) | set(self.game_state.maps.keys())
+        if raw_id in all_ids:
+            return raw_id
+
+        # 常见玩家别名修正
+        if raw_id in {"player_001", "player-001", "player001", "char_player_01"} and self.game_state.player_id:
+            return self.game_state.player_id
+
+        def normalize(text: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", text.lower())
+
+        target = normalize(raw_id)
+        if not target:
+            return raw_id
+
+        for entity_id in all_ids:
+            if normalize(entity_id) == target:
+                return entity_id
+
+        return raw_id
     
     def _sync_state_change(self, change: StateChange):
         """
@@ -548,13 +587,13 @@ class GameEngine:
         if resolved:
             # 回合已解决，处理行动队列
             if self._current_actor_id and self._action_queue:
-                # 将当前行动者移到队尾（如果还能继续行动）
+                # 将当前行动者移到队尾（如果还能继续行动）#修改建议:对charactor增加一个move_able字段记录其是否能进入行动队列,move_able中有:1.行动能力:bool能否行动 2.行动优先级,使用敏捷值与状态中的生命值占总生命值的比值和san值占总san占总san值得比值,如人物a:hp:20/100(此人最大生命值),san:30/100(此人最大san值) 比值为0.2,0.3利用一个公式来确定在一个行动队列中的行动顺序,当hp和san值为0时这个公式能够保证其结果为0,此时不加入行动队列
                 current_actor = self.game_state.characters.get(self._current_actor_id)
                 if current_actor and self._can_actor_act(current_actor):
                     # 移到队尾，参与下一回合
                     self._action_queue.append(self._action_queue.pop(0))
                 else:
-                    # 无法继续行动，从队列移除
+                    # 无法继续行动，从队列移除 #修改建议系统需要遍历所有move_able字段中对于能否行动的bool值为true的角色,如果为true则尝试判断行动优先级,因为行动优先级的确认过程中我们能够确定其是否能够行动,因而就能实现对于原本不在行动队列的角色加入行动队列,对于状态为0的角色移除行动队列的动态队列退出机制了
                     self._action_queue.pop(0)
             
             # 增加回合数
@@ -746,7 +785,7 @@ class GameEngine:
         return args
     
     def _create_default_world(self, player_name: str):
-        """创建默认游戏世界"""
+        """创建默认游戏世界""" #修改建议:删去这个没有作用且会引起屎山代码的无用降级策略,使用统一接口创建世界而非在这里硬编码
         from src.data.models import (
             CharacterAttributes, CharacterStatus, Description, MapEntities
         )
