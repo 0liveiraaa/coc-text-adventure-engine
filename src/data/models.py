@@ -20,7 +20,15 @@ class Description(BaseModel):
 
     def get_public_text(self) -> str:
         """获取所有公开描述的拼接文本"""
-        return "\n".join([p.get("description", "") for p in self.public])
+        lines: List[str] = []
+        for entry in self.public:
+            if isinstance(entry, dict):
+                lines.append(str(entry.get("description", "")))
+            elif isinstance(entry, str):
+                lines.append(entry)
+            else:
+                lines.append(str(entry))
+        return "\n".join(lines)
     
     def add_public_description(self, text: str) -> None:
         """添加新的公开描述"""

@@ -145,41 +145,12 @@ class DMAgent:
         
         Returns:
             系统提示词内容
-        """#修改建议:使用统一接口,如果读取失败直接报错,不要搞多余的接口,多余的冗余,容易成屎山代码
-        try:
-            # 从prompt模块加载
-            from src.agent.prompt import load_system_prompt
-            return load_system_prompt()
-        except ImportError:
-            logger.warning("无法从prompt模块加载系统提示词，尝试直接读取文件")
-        
-        # 直接读取文件
-        prompt_path = Path(__file__).parent / "prompt" / "system_prompt.md"
-        try:
-            with open(prompt_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except FileNotFoundError:
-            logger.error(f"系统提示词文件不存在: {prompt_path}")
-            # 返回一个基本的备用提示词
-            return self._get_fallback_system_prompt()
-    
-    def _get_fallback_system_prompt(self) -> str:#修改建议:无用降级策略,就算你读了备用提示词游戏就能正常游玩吗?,鉴定为直接删除,改为终止并报错
         """
-        获取备用系统提示词（当文件不存在时使用）
-        
-        Returns:
-            备用系统提示词
-        """
-        return """你是COC游戏主持人。请解析玩家输入，判断：
-1. is_dialogue: 是否为纯对话
-2. needs_check: 是否需要鉴定
-3. check_type: 鉴定类型（"非对抗鉴定"/"对抗鉴定"）
-4. check_attributes: 相关属性列表
-5. check_target: 对抗目标（如有）
-6. difficulty: 难度（"常规"/"困难"/"极难"）
-7. action_description: 行动描述
-
-请以JSON格式返回。"""
+        from src.agent.prompt import load_system_prompt
+        prompt = load_system_prompt()
+        if not prompt or not prompt.strip():
+            raise RuntimeError("DM Agent系统提示词为空")
+        return prompt
     
     def parse_intent(
         self,

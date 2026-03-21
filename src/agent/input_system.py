@@ -57,6 +57,7 @@ class InputSystem:
         "use": "使用物品",
         "give": "给予物品给角色",
         "status": "查看自身状态",
+        "where": "查看当前位置",
         "save": "保存进度",
         "load": "加载进度",
         "reset": "重置游戏",
@@ -489,6 +490,40 @@ class InputSystem:
         
         return description, changes
 
+    def _cmd_where(
+        self,
+        args: List[str],
+        player: Character,
+        game_state: GameState
+    ) -> Tuple[str, List[StateChange]]:
+        """
+        查看当前位置
+        
+        Args:
+            args: 无参数
+            player: 玩家角色
+            game_state: 游戏状态
+            
+        Returns:
+            Tuple[描述文本, 变更列表]
+        """
+        changes = []
+        
+        current_map = game_state.get_current_map()
+        if not current_map:
+            return "你似乎迷失在了虚空之中...", changes
+        
+        description = f"【当前位置】{current_map.name}\n\n"
+        description += f"{current_map.description.get_public_text()}\n\n"
+        
+        # 显示可通往的方向
+        if current_map.neighbors:
+            description += "【可通往】\n"
+            for neighbor in current_map.neighbors:
+                description += f"  {neighbor.direction}: {neighbor.description}\n"
+        
+        return description, changes
+
     def _cmd_use(
         self,
         args: List[str],
@@ -653,7 +688,8 @@ class InputSystem:
         help_text += "信息查看类:\n"
         help_text += "  \\look [目标]   - 查看当前场景或指定目标\n"
         help_text += "  \\inventory     - 查看背包\n"
-        help_text += "  \\status        - 查看自身状态\n\n"
+        help_text += "  \\status        - 查看自身状态\n"
+        help_text += "  \\where         - 查看当前位置\n\n"
         
         help_text += "物品操作类:\n"
         help_text += "  \\pickup <物品名> - 捡起物品\n"

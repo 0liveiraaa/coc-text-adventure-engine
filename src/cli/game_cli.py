@@ -476,6 +476,14 @@ class GameCLI:
         """显示处理结果"""
         if not result:
             return
+
+        if isinstance(result, str):
+            print(f"\n{result}")
+            return
+
+        if not isinstance(result, dict):
+            self.display.print_error(f"无法识别的返回结果类型: {type(result).__name__}")
+            return
         
         # 显示直接响应
         if result.get("response"):

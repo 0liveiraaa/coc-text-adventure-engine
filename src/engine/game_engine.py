@@ -25,7 +25,7 @@ from src.data.models import (
 from src.agent.input_system import InputSystem, InputResult, InputType
 from src.agent.dm_agent import DMAgent
 from src.agent.state_evolution import StateEvolution as StateEvolutionAgent
-from src.agent.prompt import load_system_prompt, load_state_evolution_prompt
+from src.data.init.world_loader import load_initial_world_bundle
 from src.rule.rule_system import RuleSystem
 
 # 配置日志
@@ -75,6 +75,7 @@ class GameEngine:
         self._current_narrative = ""  # 当前回合叙事
         self._ending_text = ""  # 结局文本
         self._is_game_over = False
+        self.dm_dialogue_log: List[Dict[str, str]] = []  # DM与玩家对话记录
         
         # 回合管理
         self._action_queue: List[str] = []  # 可行动角色队列
@@ -85,10 +86,6 @@ class GameEngine:
         self.end_condition = "玩家死亡或达成剧情结局"
         self._ending_rules: List[Dict[str, Any]] = []
         
-        # 加载提示词
-        self._system_prompt = load_system_prompt() #修改建议: 修改一下名字这是dmagent的提示词而非全局使用的系统提示词,此外提示词应该交由各个agent实例管理而非让gameEgine管理
-        self._state_evolution_prompt = load_state_evolution_prompt()
-        
         logger.info("游戏引擎初始化完成")
     
     # ============================================================
@@ -97,20 +94,18 @@ class GameEngine:
     
     def new_game(
         self,
-        player_name: str,
-        scenario_id: Optional[str] = None
+        world_name: str = "mysterious_library"
     ) -> bool:
         """
         开始新游戏
         
         Args:
-            player_name: 玩家角色名称
-            scenario_id: 剧本ID（可选，用于加载预设场景）
+            world_name: 世界配置目录名
             
         Returns:
             是否成功启动
         """
-        logger.info(f"开始新游戏，玩家: {player_name}")
+        logger.info(f"开始新游戏，世界: {world_name}")
         
         try:
             # 清空现有状态
@@ -119,12 +114,13 @@ class GameEngine:
             self._ending_text = ""
             self._current_narrative = ""
             
-            # 如果有指定剧本，加载剧本数据
-            if scenario_id:
-                self._load_scenario(scenario_id)
-            else:
-                # 创建默认场景和角色
-                self._create_default_world(player_name) #修改建议:删掉,不要在game_engine里用两个接口创建世界,全部走配置表单这一单一接口,如果你要搞默认世界,就写个默认世界配置表单在world文件夹里面,然后走同一个接口创建世界
+            bundle = load_initial_world_bundle(
+                self.io,
+                player_name=None,
+                world_name=world_name
+            )
+            self.game_state = bundle.game_state
+            self.apply_world_settings(bundle.world_name, bundle.end_condition)
             
             # 初始化回合
             self.game_state.turn_count = 1
@@ -161,6 +157,7 @@ class GameEngine:
             
             with open(save_path, "r", encoding="utf-8") as f:
                 save_data = json.load(f)
+            self.dm_dialogue_log = save_data.pop("dm_dialogue_log", [])
             
             # 恢复游戏状态
             self.game_state = GameState(**save_data)
@@ -194,6 +191,7 @@ class GameEngine:
             
             # 序列化游戏状态
             save_data = self.game_state.model_dump()
+            save_data["dm_dialogue_log"] = self.dm_dialogue_log
             
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -207,13 +205,8 @@ class GameEngine:
     
     def restart(self):
         """重新开始游戏"""
-        player_name = "调查员"
-        if self.game_state.player_id:
-            player = self.game_state.get_player()
-            if player:
-                player_name = player.name
-        
-        self.new_game(player_name)
+        target_world = self.world_name if self.world_name else "mysterious_library"
+        self.new_game(target_world)
 
     def apply_world_settings(self, world_name: str, end_condition: str):
         """应用世界级配置（例如来自world.json）。"""
@@ -291,19 +284,16 @@ class GameEngine:
                     if cmd_result.direct_response == "RESET_GAME":
                         self.restart()
                         result["response"] = "游戏已重置并重新开始"
-                        self._turn_end(resolved=True)
                         return result
 
                     if cmd_result.direct_response == "DEBUG_MODE_ON":
                         logging.getLogger().setLevel(logging.DEBUG)
                         result["response"] = "调试模式已开启"
-                        self._turn_end(resolved=True)
                         return result
 
                     if cmd_result.direct_response == "DEBUG_MODE_OFF":
                         logging.getLogger().setLevel(logging.INFO)
                         result["response"] = "调试模式已关闭"
-                        self._turn_end(resolved=True)
                         return result
                     
                     # 应用基础指令产生的变更
@@ -311,13 +301,17 @@ class GameEngine:
                         self._apply_changes(cmd_result.changes)
                     
                     result["response"] = cmd_result.direct_response
-                    
-                    # ===== Step 7: 回合结束 =====  #对于玩家回合,玩家输入系统指令之后不应该回合结束而是玩家继续行动,所以这里要进行控制流的修改建议
-                    self._turn_end(resolved=True)
                     return result
                 else:
                     result["response"] = input_result.direct_response or "未知指令"
                     return result
+
+            npc_prelude = self._process_npc_turns_until_player()
+            npc_prelude_text = (npc_prelude.get("narrative") or "").strip()
+            if npc_prelude.get("game_over"):
+                result["game_over"] = True
+                result["narrative"] = npc_prelude.get("narrative")
+                return result
             
             # 自然语言输入，继续DM Agent处理
             natural_input = input_result.natural_input
@@ -328,13 +322,9 @@ class GameEngine:
             # 如果是纯对话，直接回复
             if dm_output.is_dialogue:
                 result["response"] = dm_output.response_to_player
-                
-                #修改建议: 记录到dmagent的对话日志而非玩家记忆,如果你的dmagent类里面没有创建就创建一个,同时每个存档应该有一个dmagent_log.mdjson存储dmagent与玩家的对话记录,每一轮对话记录应该有玩家的输入和系统的回复,同理回合也不应该结束,回合结束应该是玩家发起了了一轮会修改游戏状态的交互才结束
-                player = self.game_state.get_player()
-                if player:
-                    player.memory.current_event = dm_output.response_to_player
-                
-                self._turn_end(resolved=True)
+                if npc_prelude_text and result["response"]:
+                    result["response"] = f"{npc_prelude_text}\n{result['response']}"
+                self._record_dm_dialogue(natural_input, dm_output.response_to_player)
                 return result
             
             check_output = None
@@ -351,7 +341,10 @@ class GameEngine:
             )
             
             result["narrative"] = evolution_result.narrative
+            if npc_prelude_text and result["narrative"]:
+                result["narrative"] = f"{npc_prelude_text}\n{result['narrative']}"
             self._current_narrative = evolution_result.narrative
+            self._record_dm_dialogue(natural_input, evolution_result.narrative)
             
             # ===== Step 6: 应用状态变更 =====
             if evolution_result.changes:
@@ -362,18 +355,34 @@ class GameEngine:
             if player:
                 player.memory.current_event = evolution_result.narrative
             
-            # 检查游戏结束 修改建议: 查看一下state_agent有没有能力确定是否到达结局:1.输入中是否有结局条件 2.能否输出结局文本和含有是否结局得标识符 现在目前得使用代码进行判断决定是否结局的方式应该是保证措施,也即首先check is_end是否为true如果不为true使用该系统再确定一下是否真的是false,如果真的是就继续游戏,如果不是就调用默认的结局文本,并终止游戏,如果is_end为true那么就直接输出结局文本(来自状态推演系统的),并终止游戏,所以现在主要依靠状态推演系统判断是否结局,使用代码判断来保底 
-            config_ending_text = self._evaluate_configured_endings()
-            if config_ending_text:
+            # 结局判定采用双轨：AI主判定，代码规则保底。
+            if evolution_result.is_end:
                 self._is_game_over = True
-                self._ending_text = config_ending_text
+                self._ending_text = evolution_result.end_narrative or self._evaluate_configured_endings()
                 result["game_over"] = True
-                result["narrative"] += f"\n\n{self._ending_text}"
-            elif evolution_result.is_end:
-                self._is_game_over = True
-                self._ending_text = evolution_result.end_narrative
-                result["game_over"] = True
-                result["narrative"] += f"\n\n{self._ending_text}"
+                if self._ending_text:
+                    result["narrative"] += f"\n\n{self._ending_text}"
+            else:
+                ai_end = None
+                if hasattr(self.state_agent, "check_end_condition"):
+                    try:
+                        ai_end = self.state_agent.check_end_condition(self.game_state)
+                    except Exception as e:
+                        logger.warning(f"AI结局复核失败，回退代码保底: {e}")
+
+                if ai_end and ai_end.is_end:
+                    self._is_game_over = True
+                    self._ending_text = ai_end.end_narrative or self._evaluate_configured_endings()
+                    result["game_over"] = True
+                    if self._ending_text:
+                        result["narrative"] += f"\n\n{self._ending_text}"
+                else:
+                    config_ending_text = self._evaluate_configured_endings()
+                    if config_ending_text:
+                        self._is_game_over = True
+                        self._ending_text = config_ending_text
+                        result["game_over"] = True
+                        result["narrative"] += f"\n\n{self._ending_text}"
             
             # ===== Step 7: 回合结束 =====
             self._turn_end(resolved=evolution_result.resolved)
@@ -403,6 +412,76 @@ class GameEngine:
             self._current_actor_id = self.game_state.player_id
         
         logger.debug(f"第 {self.game_state.turn_count} 回合开始，当前行动者: {self._current_actor_id}")
+
+    def _process_npc_turns_until_player(self) -> Dict[str, Any]:
+        """在玩家输入前处理连续NPC回合，直到轮到玩家或游戏结束。"""
+        narratives: List[str] = []
+        max_steps = 1
+
+        if not hasattr(self.state_agent, "evolve_npc_action"):
+            self._current_actor_id = self.game_state.player_id
+            return {
+                "game_over": False,
+                "narrative": ""
+            }
+
+        for _ in range(max_steps):
+            if self.is_player_turn() or not self._current_actor_id:
+                break
+
+            actor = self.get_current_actor()
+            if not actor or actor.is_player or not self._can_actor_act(actor):
+                self._turn_end(resolved=True)
+                self._turn_start()
+                continue
+
+            npc_check = self._execute_npc_check(actor)
+
+            npc_output = self.state_agent.evolve_npc_action(
+                npc_id=actor.id,
+                game_state=self.game_state,
+                check_result=npc_check,
+                additional_context={"engine_context": self._build_game_context()}
+            )
+
+            if npc_output.changes:
+                self._apply_changes(npc_output.changes)
+
+            if npc_output.narrative:
+                narratives.append(f"[{actor.name}] {npc_output.narrative}")
+
+            if npc_output.is_end:
+                self._is_game_over = True
+                self._ending_text = npc_output.end_narrative
+                ending_text = "\n\n" + self._ending_text if self._ending_text else ""
+                return {
+                    "game_over": True,
+                    "narrative": "\n".join(narratives) + ending_text
+                }
+
+            # NPC回合不支持连动，强制收束为一步，避免阻塞玩家输入。
+            self._turn_end(resolved=True)
+            self._turn_start()
+
+        return {
+            "game_over": False,
+            "narrative": "\n".join(narratives)
+        }
+
+    def _execute_npc_check(self, actor: Character) -> Optional[CheckOutput]:
+        """执行NPC回合的基础规则检定。"""
+        try:
+            check_input = CheckInput(
+                check_type=CheckType.REGULAR,
+                attributes=["dex"],
+                actor_id=actor.id,
+                target_id=None,
+                difficulty=CheckDifficulty.REGULAR,
+            )
+            return self.rule_system.execute_check(check_input, self.game_state)
+        except Exception as e:
+            logger.warning(f"NPC检定失败，回退为无检定推演: actor={actor.id}, err={e}")
+            return None
     
     def _dm_agent_parse(self, player_input: str) -> DMAgentOutput:
         """
@@ -555,16 +634,16 @@ class GameEngine:
         # 根据变更类型更新内存对象
         if change.id in self.game_state.characters:
             char = self.game_state.characters[change.id]
-            self._update_entity_field(char, change.field, change.value)
+            self._update_entity_field(char, change.field, change.value, change.operation)
         elif change.id in self.game_state.items:
             item = self.game_state.items[change.id]
-            self._update_entity_field(item, change.field, change.value)
+            self._update_entity_field(item, change.field, change.value, change.operation)
         elif change.id in self.game_state.maps:
             map_obj = self.game_state.maps[change.id]
-            self._update_entity_field(map_obj, change.field, change.value)
+            self._update_entity_field(map_obj, change.field, change.value, change.operation)
     
-    def _update_entity_field(self, entity: Any, field: str, value: Any):
-        """更新实体字段"""
+    def _update_entity_field(self, entity: Any, field: str, value: Any, operation: ChangeOperation):
+        """按操作类型更新实体字段。"""
         field_parts = field.split('.')
         
         try:
@@ -573,7 +652,23 @@ class GameEngine:
                 current = getattr(current, part)
             
             final_field = field_parts[-1]
-            setattr(current, final_field, value)
+            target = getattr(current, final_field)
+
+            if operation == ChangeOperation.UPDATE:
+                setattr(current, final_field, value)
+            elif operation == ChangeOperation.ADD:
+                if isinstance(target, list):
+                    target.append(value)
+                else:
+                    logger.warning(f"ADD操作目标不是列表: {field}")
+            elif operation == ChangeOperation.DELETE:
+                if isinstance(target, list):
+                    if value in target:
+                        target.remove(value)
+                else:
+                    setattr(current, final_field, None)
+            else:
+                logger.warning(f"未知操作类型: {operation}")
         except AttributeError as e:
             logger.warning(f"更新字段失败: {field}, {e}")
     
@@ -585,16 +680,8 @@ class GameEngine:
             resolved: 回合是否已解决
         """
         if resolved:
-            # 回合已解决，处理行动队列
-            if self._current_actor_id and self._action_queue:
-                # 将当前行动者移到队尾（如果还能继续行动）#修改建议:对charactor增加一个move_able字段记录其是否能进入行动队列,move_able中有:1.行动能力:bool能否行动 2.行动优先级,使用敏捷值与状态中的生命值占总生命值的比值和san值占总san占总san值得比值,如人物a:hp:20/100(此人最大生命值),san:30/100(此人最大san值) 比值为0.2,0.3利用一个公式来确定在一个行动队列中的行动顺序,当hp和san值为0时这个公式能够保证其结果为0,此时不加入行动队列
-                current_actor = self.game_state.characters.get(self._current_actor_id)
-                if current_actor and self._can_actor_act(current_actor):
-                    # 移到队尾，参与下一回合
-                    self._action_queue.append(self._action_queue.pop(0))
-                else:
-                    # 无法继续行动，从队列移除 #修改建议系统需要遍历所有move_able字段中对于能否行动的bool值为true的角色,如果为true则尝试判断行动优先级,因为行动优先级的确认过程中我们能够确定其是否能够行动,因而就能实现对于原本不在行动队列的角色加入行动队列,对于状态为0的角色移除行动队列的动态队列进退机制了
-                    self._action_queue.pop(0)
+            # 回合已解决：动态重算队列，并将刚行动角色放到队尾避免连续行动。
+            self._refresh_action_queue(last_actor_id=self._current_actor_id)
             
             # 增加回合数
             self.game_state.turn_count += 1
@@ -607,19 +694,53 @@ class GameEngine:
             logger.debug("回合未解决，保持当前行动者")
         
         logger.debug(f"回合结束，当前回合: {self.game_state.turn_count}, 行动队列: {self._action_queue}")
+
+    def _record_dm_dialogue(self, player_input: str, dm_response: str):
+        """记录玩家与DM的对话历史。"""
+        self.dm_dialogue_log.append({
+            "turn": str(self.game_state.turn_count),
+            "player_input": player_input,
+            "dm_response": dm_response,
+        })
     
     # ============================================================
     # 辅助方法
     # ============================================================
     
-    def _refresh_action_queue(self):
-        """刷新行动队列"""
-        # 从game_state初始化行动队列
-        if self.game_state.turn_order:
-            self._action_queue = self.game_state.turn_order.copy()
-        else:
-            # 默认只有玩家
-            self._action_queue = [self.game_state.player_id] if self.game_state.player_id else []
+    def _refresh_action_queue(self, last_actor_id: Optional[str] = None):
+        """刷新行动队列。"""
+        self._action_queue = self._build_dynamic_action_queue(last_actor_id=last_actor_id)
+
+    def _build_dynamic_action_queue(self, last_actor_id: Optional[str] = None) -> List[str]:
+        """按可行动性与优先级动态构建行动队列。"""
+        ranked: List[Tuple[str, float]] = []
+        for char_id, actor in self.game_state.characters.items():
+            score = self._calculate_actor_priority(actor)
+            if score > 0:
+                ranked.append((char_id, score))
+
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        ordered_ids = [char_id for char_id, _ in ranked]
+
+        # 若刚行动角色仍可行动，则放到队尾，避免连续行动。
+        if last_actor_id and last_actor_id in ordered_ids:
+            ordered_ids.remove(last_actor_id)
+            ordered_ids.append(last_actor_id)
+
+        return ordered_ids
+
+    def _calculate_actor_priority(self, actor: Character) -> float:
+        """计算角色行动优先级：DEX + HP占比 + SAN占比。"""
+        if not self._can_actor_act(actor):
+            return 0.0
+
+        max_hp = max(1, actor.status.max_hp)
+        hp_ratio = max(0.0, min(1.0, actor.status.hp / max_hp))
+        # 当前模型没有max_san字段，默认按100作为满值。
+        san_ratio = max(0.0, min(1.0, actor.status.san / 100.0))
+        dex_ratio = max(0.0, min(1.0, actor.attributes.dex / 100.0))
+
+        return round((dex_ratio * 0.5) + (hp_ratio * 0.3) + (san_ratio * 0.2), 6)
     
     def _can_actor_act(self, actor: Character) -> bool:
         """检查角色是否还能继续行动"""
@@ -639,10 +760,6 @@ class GameEngine:
     def is_player_turn(self) -> bool:
         """检查是否是玩家回合"""
         return self._current_actor_id == self.game_state.player_id
-    
-    def _build_system_prompt(self) -> str:
-        """构建系统提示词"""
-        return self._system_prompt
     
     def _build_game_context(self) -> Dict[str, Any]:
         """构建游戏上下文"""
@@ -783,62 +900,6 @@ class GameEngine:
             args.append(tail)
 
         return args
-    
-    def _create_default_world(self, player_name: str):
-        """创建默认游戏世界""" #修改建议:删去这个没有作用且会引起屎山代码的无用降级策略,使用统一接口创建世界而非在这里硬编码
-        from src.data.models import (
-            CharacterAttributes, CharacterStatus, Description, MapEntities
-        )
-        
-        # 创建玩家角色
-        player = Character(
-            id="player-001",
-            name=player_name,
-            basic_info="一位勇敢的调查员",
-            description=Description(
-                public=[{"description": "一名普通的调查员，正在探索未知的秘密。"}],
-                hint=""
-            ),
-            location="map-library-entrance",
-            inventory=[],
-            status=CharacterStatus(hp=12, max_hp=12, san=60, lucky=50),
-            attributes=CharacterAttributes(
-                str=12, con=12, siz=13, dex=10,
-                app=11, int=13, pow=12, edu=14
-            ),
-            is_player=True
-        )
-        
-        # 创建初始场景
-        entrance = Map(
-            id="map-library-entrance",
-            name="图书馆入口",
-            description=Description(
-                public=[{"description": "古老的图书馆入口，厚重的木门微微敞开，里面传来陈旧纸张的气息。"}],
-                hint="这里是一个神秘调查的起点"
-            ),
-            neighbors=[],
-            entities=MapEntities(characters=["player-001"], items=[])
-        )
-        
-        # 添加游戏状态
-        self.game_state.characters["player-001"] = player
-        self.game_state.maps["map-library-entrance"] = entrance
-        self.game_state.player_id = "player-001"
-        self.game_state.current_scene_id = "map-library-entrance"
-        self.game_state.turn_order = ["player-001"]
-        
-        # 保存到数据库
-        self.io.save_character(player)
-        self.io.save_map(entrance)
-        
-        logger.info("默认世界创建完成")
-    
-    def _load_scenario(self, scenario_id: str):
-        """加载剧本"""
-        # TODO: 实现剧本加载逻辑
-        logger.info(f"加载剧本: {scenario_id}")
-        self._create_default_world("调查员")
     
     # ============================================================
     # 查询方法

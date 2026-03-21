@@ -27,7 +27,6 @@
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from pathlib import Path
 
 from src.data.models import (
     StateEvolutionInput,
@@ -148,38 +147,11 @@ class StateEvolution:
         Returns:
             系统提示词内容
         """
-        try:
-            # 尝试从prompt模块加载
-            from src.agent.prompt import load_state_evolution_prompt
-            return load_state_evolution_prompt()
-        except ImportError:
-            logger.warning("无法从prompt模块加载状态推演提示词，尝试直接读取文件")
-        
-        # 直接读取文件
-        prompt_path = Path(__file__).parent / "prompt" / "state_evolution_prompt.md"
-        try:
-            with open(prompt_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except FileNotFoundError:
-            logger.error(f"状态推演提示词文件不存在: {prompt_path}")
-            return self._get_fallback_system_prompt()
-    #修改建议:删除
-    def _get_fallback_system_prompt(self) -> str:
-        """
-        获取备用系统提示词（当文件不存在时使用）
-        
-        Returns:
-            备用系统提示词
-        """
-        return """你是COC游戏状态推演系统。根据鉴定结果生成叙事和状态变更。
-
-你需要：
-1. 生成narrative: 描述发生了什么
-2. 生成changes: 状态变更列表
-3. 判断resolved: 回合是否结束
-4. 判断is_end: 是否游戏结束
-
-请以JSON格式返回。"""
+        from src.agent.prompt import load_state_evolution_prompt
+        prompt = load_state_evolution_prompt()
+        if not prompt or not prompt.strip():
+            raise RuntimeError("状态推演系统提示词为空")
+        return prompt
     
     def evolve_player_action(
         self,
@@ -215,12 +187,13 @@ class StateEvolution:
         )
         
         # 调用LLM
-        return self._call_evolution(prompt)
+        return self._call_evolution(prompt, game_state=game_state)
     
     def evolve_npc_action(
         self,
         npc_id: str,
         game_state: GameState,
+        check_result: Optional[CheckOutput] = None,
         npc_intent: Optional[str] = None,
         additional_context: Optional[Dict[str, Any]] = None
     ) -> StateEvolutionOutput:
@@ -233,6 +206,7 @@ class StateEvolution:
         Args:
             npc_id: NPC角色ID
             game_state: 当前游戏状态
+            check_result: NPC鉴定结果（可选）
             npc_intent: NPC意图描述（可选）
             additional_context: 额外上下文信息
         
@@ -266,11 +240,12 @@ class StateEvolution:
         prompt = self._build_npc_action_prompt(
             npc_id=npc_id,
             npc_intent=npc_intent,
+            check_result=check_result,
             game_context=game_context
         )
         
         # 调用LLM
-        return self._call_evolution(prompt)
+        return self._call_evolution(prompt, game_state=game_state)
     
     def check_end_condition(self, game_state: GameState) -> Optional[StateEvolutionOutput]:
         """
@@ -290,7 +265,7 @@ class StateEvolution:
         prompt = self._build_end_check_prompt(game_context)
         
         # 调用LLM进行结局判定
-        result = self._call_evolution(prompt)
+        result = self._call_evolution(prompt, game_state=game_state)
         
         if result.is_end:
             return result
@@ -460,6 +435,7 @@ class StateEvolution:
         self,
         npc_id: str,
         npc_intent: Optional[str],
+        check_result: Optional[CheckOutput],
         game_context: Dict[str, Any]
     ) -> str:
         """
@@ -479,6 +455,7 @@ class StateEvolution:
         
         # NPC意图文本
         intent_text = f"**NPC意图**: {npc_intent}\n" if npc_intent else ""
+        check_text = self._format_check_result(check_result)
         
         prompt = f"""{self.system_prompt}
 
@@ -489,6 +466,10 @@ class StateEvolution:
 {context_text}
 
 {intent_text}
+
+## NPC检定信息
+
+{check_text}
 
 ## 说明
 
@@ -644,7 +625,7 @@ class StateEvolution:
 - 实际值: {check_result.actor_value}
 - 详情: {check_result.detail}"""
     
-    def _call_evolution(self, prompt: str) -> StateEvolutionOutput:
+    def _call_evolution(self, prompt: str, game_state: Optional[GameState] = None) -> StateEvolutionOutput:
         """
         调用LLM进行状态推演
         
@@ -654,25 +635,57 @@ class StateEvolution:
         Returns:
             StateEvolutionOutput对象
         """
+        error_feedback = ""
+
         try:
-            response = self.llm_service.call_llm_json(
-                prompt=prompt,
-                schema=STATE_EVOLUTION_OUTPUT_SCHEMA,
-                temperature=0.7  # 使用较高温度以获得更丰富的叙事
-            )
-            
-            if not response.get("success"):
-                error_msg = response.get("error", "未知错误")
-                logger.error(f"LLM调用失败: {error_msg}")
-                return self._create_fallback_output(f"推演失败: {error_msg}")
-            
-            # 解析JSON结果
-            data = response.get("data", {})
-            return self._parse_output(data)
-            
+            for attempt in range(1, 3):
+                prompt_with_feedback = self._append_error_feedback(prompt, error_feedback)
+                response = self.llm_service.call_llm_json(
+                    prompt=prompt_with_feedback,
+                    schema=STATE_EVOLUTION_OUTPUT_SCHEMA,
+                    temperature=0.7  # 使用较高温度以获得更丰富的叙事
+                )
+
+                if not response.get("success"):
+                    error_msg = response.get("error", "未知错误")
+                    logger.error(f"LLM调用失败: {error_msg}")
+                    return self._create_fallback_output(f"推演失败: {error_msg}")
+
+                data = response.get("data", {})
+                output = self._parse_output(data)
+
+                if not game_state:
+                    return output
+
+                validation_errors = self.validate_changes(output.changes, game_state)
+                if not validation_errors:
+                    return output
+
+                llm_erro = str(data.get("erro", "")).strip()
+                lines = validation_errors[:3]
+                if llm_erro:
+                    lines.append(f"LLM erro字段: {llm_erro}")
+                error_feedback = "；".join(lines)
+                logger.warning(f"状态推演输出校验失败(第{attempt}次): {error_feedback}")
+
+            return self._create_fallback_output(f"状态推演输出校验失败: {error_feedback}")
+
         except Exception as e:
             logger.error(f"状态推演时发生异常: {e}")
             return self._create_fallback_output(f"异常: {str(e)}")
+
+    def _append_error_feedback(self, prompt: str, error_feedback: str) -> str:
+        """将系统错误反馈追加到Prompt，用于引导LLM纠正输出。"""
+        if not error_feedback:
+            return prompt
+
+        return (
+            f"{prompt}\n\n"
+            "---\n\n"
+            "## 系统错误反馈（erro）\n\n"
+            f"{error_feedback}\n\n"
+            "请根据以上错误反馈修正输出，返回合法JSON，且changes必须只引用当前存在的实体与字段。"
+        )
     
     def _parse_output(self, data: Dict[str, Any]) -> StateEvolutionOutput:
         """

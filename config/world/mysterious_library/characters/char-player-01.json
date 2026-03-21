@@ -10,10 +10,12 @@
     ],
     "hint": "玩家控制的角色，拥有调查员的本能，对超自然现象敏感"
   },
-  "location": "map-room-library-01",
-  "inventory": [],
+  "location": "map-room-corridor-01",
+  "inventory": [
+    "item-book-01"
+  ],
   "status": {
-    "hp": 12,
+    "hp": 0,
     "max_hp": 12,
     "san": 60,
     "lucky": 50

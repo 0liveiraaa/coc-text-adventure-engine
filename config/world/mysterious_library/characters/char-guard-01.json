@@ -10,7 +10,7 @@
     ],
     "hint": "他对年轻人格外警惕，但如果玩家表现出尊重，他可能会提供有用的信息。他口袋里有一把铜钥匙。"
   },
-  "location": "map-room-library-01",
+  "location": "map-room-corridor-01",
   "inventory": [
     "item-key-01"
   ],

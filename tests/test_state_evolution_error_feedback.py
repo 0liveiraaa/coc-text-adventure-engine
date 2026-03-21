@@ -1,0 +1,93 @@
+import unittest
+
+from src.agent.state_evolution import StateEvolution
+from src.data.models import GameState, Character, CharacterStatus, CharacterAttributes
+
+
+class FakeLLMService:
+    def __init__(self):
+        self.prompts = []
+        self.calls = 0
+
+    def call_llm_json(self, prompt, schema, temperature=0.7):
+        self.calls += 1
+        self.prompts.append(prompt)
+
+        if self.calls == 1:
+            return {
+                "success": True,
+                "data": {
+                    "narrative": "第一次输出，包含错误ID。",
+                    "changes": [
+                        {
+                            "id": "bad-id",
+                            "field": "status.hp",
+                            "operation": "update",
+                            "value": 8,
+                        }
+                    ],
+                    "resolved": True,
+                    "is_end": False,
+                    "end_narrative": "",
+                    "erro": "实体ID不存在",
+                },
+                "content": "",
+                "model": "fake",
+                "error": None,
+            }
+
+        return {
+            "success": True,
+            "data": {
+                "narrative": "第二次输出，已修正。",
+                "changes": [
+                    {
+                        "id": "char-player-01",
+                        "field": "status.hp",
+                        "operation": "update",
+                        "value": 8,
+                    }
+                ],
+                "resolved": True,
+                "is_end": False,
+                "end_narrative": "",
+            },
+            "content": "",
+            "model": "fake",
+            "error": None,
+        }
+
+
+class StateEvolutionErroFeedbackTests(unittest.TestCase):
+    def test_error_feedback_retries_and_corrects_changes(self):
+        fake_llm = FakeLLMService()
+        agent = StateEvolution(llm_service=fake_llm, system_prompt="test prompt")
+
+        game_state = GameState(
+            characters={
+                "char-player-01": Character(
+                    id="char-player-01",
+                    name="调查员",
+                    status=CharacterStatus(hp=10, max_hp=12, san=60, lucky=50),
+                    attributes=CharacterAttributes(dex=12),
+                    is_player=True,
+                )
+            },
+            player_id="char-player-01",
+        )
+
+        result = agent.evolve_player_action(
+            check_result=None,
+            action_description="尝试包扎伤口",
+            game_state=game_state,
+        )
+
+        self.assertEqual(fake_llm.calls, 2)
+        self.assertIn("系统错误反馈（erro）", fake_llm.prompts[1])
+        self.assertEqual(result.narrative, "第二次输出，已修正。")
+        self.assertEqual(len(result.changes), 1)
+        self.assertEqual(result.changes[0].id, "char-player-01")
+
+
+if __name__ == "__main__":
+    unittest.main()

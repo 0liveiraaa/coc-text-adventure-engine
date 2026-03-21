@@ -26,6 +26,22 @@ class FakeIO:
         return ERROR_SUCCESS
 
 
+class DummyRuleSystem:
+    def __init__(self):
+        self.calls = 0
+
+    def execute_check(self, check_input, game_state):
+        self.calls += 1
+        from src.data.models import CheckOutput, CheckResult
+        return CheckOutput(
+            result=CheckResult.SUCCESS,
+            dice_roll=30,
+            target_value=50,
+            actor_value=50,
+            detail="NPC检定成功",
+        )
+
+
 class DummyDMAgent:
     def parse_intent(self, player_input: str, game_state: GameState):
         return DMAgentOutput(
@@ -54,6 +70,9 @@ class DummyStateAgent:
             end_narrative="",
         )
 
+    def check_end_condition(self, game_state):
+        return None
+
 
 class AliasIdStateAgent:
     def __init__(self):
@@ -68,6 +87,65 @@ class AliasIdStateAgent:
                     field="inventory",
                     operation=ChangeOperation.UPDATE,
                     value=["item-lantern-01"],
+                )
+            ],
+            resolved=True,
+            next_action_hint=None,
+            is_end=False,
+            end_narrative="",
+        )
+
+    def check_end_condition(self, game_state):
+        return None
+
+
+class AiEndReviewStateAgent(DummyStateAgent):
+    def check_end_condition(self, game_state):
+        return StateEvolutionOutput(
+            narrative="",
+            changes=[],
+            resolved=True,
+            next_action_hint=None,
+            is_end=True,
+            end_narrative="你的视野被无尽黑暗吞没，故事到此结束。",
+        )
+
+
+class NpcCapableStateAgent(DummyStateAgent):
+    def __init__(self):
+        super().__init__()
+        self.npc_calls = 0
+
+    def evolve_npc_action(self, npc_id, game_state, check_result=None, npc_intent=None, additional_context=None):
+        self.npc_calls += 1
+        self.last_check_result = check_result
+        return StateEvolutionOutput(
+            narrative="守卫低声提醒你保持安静。",
+            changes=[
+                StateChange(
+                    id="char-player-01",
+                    field="status.san",
+                    operation=ChangeOperation.UPDATE,
+                    value=59,
+                )
+            ],
+            resolved=True,
+            next_action_hint=None,
+            is_end=False,
+            end_narrative="",
+        )
+
+
+class AddDescriptionStateAgent(DummyStateAgent):
+    def evolve_player_action(self, check_result, action_description, game_state, additional_context=None):
+        return StateEvolutionOutput(
+            narrative="你在墙上发现了新的刻痕。",
+            changes=[
+                StateChange(
+                    id="map-room-library-01",
+                    field="description.public",
+                    operation=ChangeOperation.ADD,
+                    value={"description": "墙面上多了一行潮湿的划痕"},
                 )
             ],
             resolved=True,
@@ -129,6 +207,108 @@ class RegressionFlowTests(unittest.TestCase):
         parsed = parser.parse_input("/help")
         self.assertEqual(parsed.input_type, InputType.BASIC_COMMAND)
         self.assertEqual(parsed.command, "help")
+
+    def test_ai_end_review_is_used_before_code_fallback(self):
+        bundle = load_initial_world_bundle(FakeIO(), player_name="测试者", world_name="mysterious_library")
+
+        engine = GameEngine(
+            io_system=FakeIO(),
+            dm_agent=DummyDMAgent(),
+            state_agent=AiEndReviewStateAgent(),
+        )
+        engine.game_state = bundle.game_state
+        engine.apply_world_settings(bundle.world_name, bundle.end_condition)
+
+        result = engine.process_input("我停下脚步")
+        self.assertTrue(result["game_over"])
+        self.assertIn("故事到此结束", result.get("narrative") or "")
+
+    def test_dynamic_action_queue_removes_unavailable_actor(self):
+        bundle = load_initial_world_bundle(FakeIO(), player_name="测试者", world_name="mysterious_library")
+
+        engine = GameEngine(
+            io_system=FakeIO(),
+            dm_agent=DummyDMAgent(),
+            state_agent=DummyStateAgent(),
+        )
+        engine.game_state = bundle.game_state
+        engine.apply_world_settings(bundle.world_name, bundle.end_condition)
+
+        guard = engine.game_state.characters.get("char-guard-01")
+        self.assertIsNotNone(guard)
+        guard.status.hp = 0
+
+        queue = engine._build_dynamic_action_queue()
+        self.assertNotIn("char-guard-01", queue)
+        self.assertIn("char-player-01", queue)
+
+    def test_npc_participates_and_applies_changes_before_player_turn(self):
+        bundle = load_initial_world_bundle(FakeIO(), player_name="测试者", world_name="mysterious_library")
+
+        state_agent = NpcCapableStateAgent()
+        rule_system = DummyRuleSystem()
+        engine = GameEngine(
+            io_system=FakeIO(),
+            dm_agent=DummyDMAgent(),
+            state_agent=state_agent,
+            rule_system=rule_system,
+        )
+        engine.game_state = bundle.game_state
+        engine.apply_world_settings(bundle.world_name, bundle.end_condition)
+
+        engine._action_queue = ["char-guard-01", "char-player-01"]
+        result = engine.process_input("继续前进")
+
+        self.assertTrue(result["success"])
+        self.assertGreaterEqual(state_agent.npc_calls, 1)
+        self.assertIsNotNone(state_agent.last_check_result)
+        self.assertEqual(rule_system.calls, 1)
+        self.assertIn("守卫低声提醒你保持安静", result.get("narrative") or "")
+
+        player = engine.game_state.get_player()
+        self.assertIsNotNone(player)
+        self.assertEqual(player.status.san, 59)
+
+    def test_add_operation_keeps_description_public_as_list(self):
+        bundle = load_initial_world_bundle(FakeIO(), player_name="测试者", world_name="mysterious_library")
+
+        engine = GameEngine(
+            io_system=FakeIO(),
+            dm_agent=DummyDMAgent(),
+            state_agent=AddDescriptionStateAgent(),
+        )
+        engine.game_state = bundle.game_state
+        engine.apply_world_settings(bundle.world_name, bundle.end_condition)
+
+        result = engine.process_input("观察墙面")
+        self.assertTrue(result["success"])
+
+        current_map = engine.game_state.get_current_map()
+        self.assertIsNotNone(current_map)
+        self.assertIsInstance(current_map.description.public, list)
+        self.assertTrue(current_map.description.get_public_text())
+
+    def test_help_command_should_not_trigger_npc_prelude(self):
+        bundle = load_initial_world_bundle(FakeIO(), player_name="测试者", world_name="mysterious_library")
+
+        state_agent = NpcCapableStateAgent()
+        rule_system = DummyRuleSystem()
+        engine = GameEngine(
+            io_system=FakeIO(),
+            dm_agent=DummyDMAgent(),
+            state_agent=state_agent,
+            rule_system=rule_system,
+        )
+        engine.game_state = bundle.game_state
+        engine.apply_world_settings(bundle.world_name, bundle.end_condition)
+
+        engine._action_queue = ["char-guard-01", "char-player-01"]
+        result = engine.process_input("\\help")
+
+        self.assertTrue(result["success"])
+        self.assertIn("基础指令列表", result.get("response") or "")
+        self.assertEqual(state_agent.npc_calls, 0)
+        self.assertEqual(rule_system.calls, 0)
 
 
 if __name__ == "__main__":

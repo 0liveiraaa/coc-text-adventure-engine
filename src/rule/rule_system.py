@@ -86,11 +86,11 @@ def determine_result(dice_roll: int, target_value: int) -> CheckResult:
 
 def get_attribute_value(character: Character, attribute_name: str) -> Optional[int]:
     """
-    从角色对象中获取属性值
+    从角色对象中获取属性值（COC规则：属性值 × 5 = 鉴定成功率）
     
     支持的属性名:
-    - 主属性: str, con, siz, dex, app, int, pow, edu
-    - 状态值: hp, san, lucky
+    - 主属性: str, con, siz, dex, app, int, pow, edu（自动×5转换为成功率）
+    - 状态值: hp, san, lucky（直接使用原始值）
     - 别名: luck (映射到lucky)
     
     Args:
@@ -102,7 +102,7 @@ def get_attribute_value(character: Character, attribute_name: str) -> Optional[i
     """
     attr_lower = attribute_name.lower()
     
-    # 主属性映射
+    # 主属性映射（COC标准：属性值 × 5% = 鉴定成功率）
     main_attributes = {
         'str': 'str',
         'con': 'con',
@@ -116,7 +116,8 @@ def get_attribute_value(character: Character, attribute_name: str) -> Optional[i
     
     # 检查主属性
     if attr_lower in main_attributes:
-        return getattr(character.attributes, main_attributes[attr_lower], None)
+        base_value = getattr(character.attributes, main_attributes[attr_lower], None)
+        return base_value * 5 if base_value is not None else None
     
     # 检查状态值
     status_mapping = {
