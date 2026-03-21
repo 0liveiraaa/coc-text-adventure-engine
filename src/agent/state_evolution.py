@@ -563,7 +563,7 @@ class StateEvolution:
             lines.append(f"- 名称: {location.get('name', '未知')}")
             lines.append(f"- 描述: {location.get('description', '无')}")
         
-        # 场景中的角色
+        # 场景中的角色 
         characters = game_context.get("current_characters", [])
         if characters:
             lines.append(f"\n### 场景中的角色")
@@ -588,7 +588,7 @@ class StateEvolution:
                 if item.get('description_hint'):
                     lines.append(f"  - 隐藏信息: {item['description_hint']}")
         
-        # 玩家信息
+        # 玩家信息 要提供玩家的id
         player = game_context.get("player_info")
         if player:
             lines.append(f"\n### 玩家信息")
