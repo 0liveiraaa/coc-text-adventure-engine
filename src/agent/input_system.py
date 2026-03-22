@@ -56,6 +56,8 @@ class InputSystem:
         "drop": "放下物品",
         "use": "使用物品",
         "give": "给予物品给角色",
+        "move": "移动到相邻场景",
+        "go": "移动到相邻场景",
         "status": "查看自身状态",
         "where": "查看当前位置",
         "save": "保存进度",
@@ -128,6 +130,8 @@ class InputSystem:
             )
         
         command = parts[0].lower()
+        if command == "go":
+            command = "move"
         args = parts[1:] if len(parts) > 1 else []
         
         return InputResult(
@@ -490,6 +494,58 @@ class InputSystem:
         
         return description, changes
 
+    def _cmd_move(
+        self,
+        args: List[str],
+        player: Character,
+        game_state: GameState
+    ) -> Tuple[str, List[StateChange]]:
+        """移动到相邻场景，支持 `\\move to=<map_id>`、`\\move to <map_id>`、`\\move <map_id>`、`\\move <方向>`。"""
+        changes = []
+
+        current_map = game_state.get_current_map()
+        if not current_map:
+            return "错误：当前不在任何场景中", changes
+
+        if not args:
+            return "请指定目标。用法: \\move to=<map_id> 或 \\move <方向>", changes
+
+        raw_target = " ".join(args).strip()
+        normalized_target = raw_target
+        lowered_raw = raw_target.lower()
+        if lowered_raw.startswith("to="):
+            normalized_target = raw_target[3:].strip()
+        elif lowered_raw.startswith("to "):
+            normalized_target = raw_target[3:].strip()
+
+        target_neighbor = None
+        for neighbor in current_map.neighbors:
+            if normalized_target == neighbor.id:
+                target_neighbor = neighbor
+                break
+            if normalized_target.lower() == neighbor.direction.lower():
+                target_neighbor = neighbor
+                break
+
+        if not target_neighbor:
+            return f"无法移动到目标: {normalized_target}（目标必须是相邻场景ID或方向）", changes
+
+        target_map = game_state.maps.get(target_neighbor.id)
+        if not target_map:
+            return f"目标场景不存在: {target_neighbor.id}", changes
+
+        changes.append(StateChange(
+            id=player.id,
+            field="location",
+            operation=ChangeOperation.UPDATE,
+            value=target_map.id
+        ))
+
+        # 保持兼容：同步current_scene_id
+        game_state.current_scene_id = target_map.id
+
+        return f"你移动到了 {target_map.name}。", changes
+
     def _cmd_where(
         self,
         args: List[str],
@@ -696,6 +752,7 @@ class InputSystem:
         help_text += "  \\drop <物品名>   - 放下物品\n\n"
         help_text += "  \\use <物品名>    - 使用物品\n"
         help_text += "  \\give <物品名> to <角色> - 给予物品\n\n"
+        help_text += "  \\move to=<地图ID>|<方向|地图ID> - 移动到相邻场景\n"
         
         help_text += "游戏控制类:\n"
         help_text += "  \\save [存档名]   - 保存进度\n"

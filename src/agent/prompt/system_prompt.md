@@ -47,6 +47,29 @@
 - 包含：谁在什么情境下试图做什么
 - 这个描述将被用于后续的叙事生成
 
+### 8. NPC响应决策
+- npc_response_needed: 是否需要NPC在本轮对玩家行动做出响应
+- npc_actor_id: 若需要响应，给出当前场景中可行动NPC的ID
+- npc_intent: 简要描述NPC将如何回应（用于后续NPC推演）
+
+当上下文中的NPC响应模式为：
+- queue：此字段仅作参考，系统可能走队列前置机制
+- reactive：此字段会直接驱动是否触发NPC响应
+
+你还会收到动态上下文字段：
+- NPC模式策略（npc_response_policy）
+- 当前行动队列快照（action_queue）
+- 当前行动者（current_actor_id）
+- 本轮前置NPC行动摘要（npc_prelude，仅queue模式可能出现）
+
+决策要求：
+- queue模式：优先保证玩家行动解析稳定，npc_response_*字段尽量保守。
+- reactive模式：若玩家行动应立即引发NPC回应，则明确给出npc_response_needed=true与npc_actor_id。
+- reactive模式补充：
+  - action_description只描述玩家本轮意图与动作，不要提前写出NPC最终态度结论。
+  - 若行动结果依赖NPC是否同意/阻止，交给后续NPC响应阶段决定。
+  - npc_intent应简短明确（例如："同意借灯"、"拒绝并阻止拿取"）。
+
 ## 输出格式
 
 请以JSON格式返回分析结果，不要包含其他文本：
@@ -60,7 +83,11 @@
   "check_attributes": ["", "int"],
   "check_target": null,
   "difficulty": "常规",
-  "action_description": "玩家试图仔细检查房间，寻找隐藏的线索或物品"
+  "action_description": "玩家试图仔细检查房间，寻找隐藏的线索或物品",
+  "npc_response_needed": false,
+  "npc_actor_id": null,
+  "npc_intent": null,
+  "erro": ""
 }
 ```
 
@@ -76,6 +103,10 @@
 | check_target | string/null | 对抗目标ID或描述 |
 | difficulty | string | 难度："常规"/"困难"/"极难" |
 | action_description | string | 行动的自然语言描述 |
+| npc_response_needed | boolean | 是否需要NPC响应 |
+| npc_actor_id | string/null | 触发响应的NPC ID |
+| npc_intent | string/null | NPC回应意图 |
+| erro | string | 可选。系统错误反馈；若收到反馈需据此修正输出 |
 
 ## 判断规则
 
@@ -128,3 +159,6 @@
 4. 如果无法确定对抗目标，则按非对抗鉴定处理
 5. 难度判断基于情境：时间紧迫、环境恶劣、目标警觉等都会增加难度
 6. 行动描述应当客观、清晰，为后续叙事生成提供充分信息
+7. 仅在当前场景确有合适NPC时才将npc_response_needed设为true
+8. npc_actor_id必须使用游戏上下文中存在的角色ID
+9. 若你收到“系统错误反馈（erro）”，必须修正输出后再返回，重点检查check_attributes是否为规则层支持字段

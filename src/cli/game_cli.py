@@ -370,6 +370,7 @@ class GameCLI:
         self.input_handler = InputHandler()
         self.running = False
         self.game_engine = game_engine
+        self._last_displayed_narrative: str = ""
         logger.info("CLI前端初始化完成")
 
     def run(self):
@@ -469,7 +470,11 @@ class GameCLI:
         
         # 显示当前事件（如果有）
         player = game_state.get_player()
-        if player and player.memory.current_event:
+        if (
+            player
+            and player.memory.current_event
+            and player.memory.current_event != self._last_displayed_narrative
+        ):
             self.display.print_narrative(player.memory.current_event)
     
     def _display_result(self, result: Dict[str, Any]):
@@ -495,7 +500,9 @@ class GameCLI:
         
         # 显示叙事文本
         if result.get("narrative"):
-            self.display.print_narrative(result["narrative"])
+            narrative = result["narrative"]
+            self.display.print_narrative(narrative)
+            self._last_displayed_narrative = narrative
     
     def get_player_name(self) -> str:
         """获取玩家名称"""

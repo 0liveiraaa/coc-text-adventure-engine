@@ -130,6 +130,27 @@
 5. **效果合理** :npc产生的变更列表中的效果应该合理
 6. **模拟鉴定**：无法直接调用鉴定系统时，需按情境合理估计行动效果
 
+### 双模式触发语义（动态拼接）
+
+你会在NPC任务中接收到运行时字段：
+- mode: `queue` 或 `reactive`
+- trigger: `queue` 或 `reactive`
+- policy: 当前模式策略文本
+- 本轮玩家行动/检定（仅reactive常见）
+
+你在玩家行动任务中也可能接收到运行时字段：
+- mode: `queue` 或 `reactive`
+- npc_response_expected: `true/false`（本轮是否预计还有NPC追响应答）
+- npc_response_actor_id: 预计响应的NPC ID（可空）
+
+行为约束：
+- mode=queue 且 trigger=queue：将NPC行动视为玩家输入前置环节，避免重复玩家行动叙事。
+- mode=reactive 且 trigger=reactive：将NPC行动视为对本轮玩家行动的回应，可引用玩家行动上下文。
+- 玩家行动任务下，若 mode=reactive 且 npc_response_expected=true：
+  - narrative 只描述玩家尝试与即时环境反馈，不替NPC做最终同意/拒绝结论。
+  - 避免生成完整NPC对话收束（例如“NPC最终允许/拒绝”）；该收束留给后续NPC响应任务。
+  - changes 仅输出本阶段可确定的变更，避免写入依赖NPC最终决定的状态。
+
 
 ### NPC决策考量
 
@@ -167,6 +188,9 @@
 4. **渐进性**：保持SAN损失和HP损失的渐进性，除非是致命攻击
 5. **线索管理**：新发现的信息可以通过description.public添加
 6. **物品管理**：物品转移时要同时更新原持有者和新持有者的inventory
+7. **ID约束**：changes中所有id和value里引用的实体ID必须来自当前上下文中已存在的实体
+8. **位置约束**：角色location只能更新到已存在的地图ID
+9. **简表单优先**：优先输出最小必要字段（id/field/operation/value），不要发明额外字段
 
 ## 示例
 

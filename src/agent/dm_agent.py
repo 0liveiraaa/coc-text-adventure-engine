@@ -39,6 +39,7 @@ from src.data.models import (
     Map,
 )
 from src.agent.llm_service import LLMService, LLMConfig
+from src.rule.rule_system import get_attribute_value
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -74,13 +75,29 @@ DMAGENT_OUTPUT_SCHEMA = {
             "description": "对抗目标ID或描述，非对抗鉴定为null"
         },
         "difficulty": {
-            "type": "string",
-            "enum": ["常规", "困难", "极难"],
-            "description": "非对抗鉴定的难度"
+            "type": ["string", "null"],
+            "enum": ["常规", "困难", "极难", None],
+            "description": "非对抗鉴定的难度，不需要鉴定时为null"
         },
         "action_description": {
             "type": "string",
             "description": "行动的自然语言描述，用于后续叙事生成"
+        },
+        "npc_response_needed": {
+            "type": "boolean",
+            "description": "是否需要NPC在本轮对玩家行动做出响应"
+        },
+        "npc_actor_id": {
+            "type": ["string", "null"],
+            "description": "需要响应的NPC ID，不需要时为null"
+        },
+        "npc_intent": {
+            "type": ["string", "null"],
+            "description": "NPC响应意图，供后续NPC推演使用"
+        },
+        "erro": {
+            "type": "string",
+            "description": "可选。系统错误反馈；若存在，需据此修正输出"
         }
     },
     "required": [
@@ -156,7 +173,8 @@ class DMAgent:
         self,
         player_input: str,
         game_state: Optional[GameState] = None,
-        dialogue_history: Optional[List[str]] = None
+        dialogue_history: Optional[List[str]] = None,
+        additional_context: Optional[Dict[str, Any]] = None
     ) -> DMAgentOutput:
         """
         解析玩家意图
@@ -193,29 +211,114 @@ class DMAgent:
             system_prompt=self.system_prompt,
             player_input=player_input,
             game_context=game_context,
-            dialogue_history=dialogue_history
+            dialogue_history=dialogue_history,
+            additional_context=additional_context
         )
         
-        # 调用LLM进行意图识别
+        error_feedback = ""
+
+        # 调用LLM进行意图识别（最多重试2次）
         try:
-            response = self.llm_service.call_llm_json(
-                prompt=prompt,
-                schema=DMAGENT_OUTPUT_SCHEMA,
-                temperature=0.3  # 使用较低温度以获得更稳定的输出
-            )
-            
-            if not response.get("success"):
-                error_msg = response.get("error", "未知错误")
-                logger.error(f"LLM调用失败: {error_msg}")
-                return self._create_fallback_output(player_input, error_msg)
-            
-            # 解析JSON结果
-            data = response.get("data", {})
-            return self._parse_output(data, player_input)
-            
+            for attempt in range(1, 3):
+                prompt_with_feedback = self._append_error_feedback(prompt, error_feedback)
+                response = self.llm_service.call_llm_json(
+                    prompt=prompt_with_feedback,
+                    schema=DMAGENT_OUTPUT_SCHEMA,
+                )
+
+                if not response.get("success"):
+                    error_feedback = response.get("error", "未知错误")
+                    logger.warning(f"DM输出失败(第{attempt}次): {error_feedback}")
+                    continue
+
+                data = response.get("data", {})
+                try:
+                    output = self._parse_output_strict(data, player_input)
+                except Exception as parse_err:
+                    llm_erro = str(data.get("erro", "")).strip()
+                    error_feedback = str(parse_err)
+                    if llm_erro:
+                        error_feedback = f"{error_feedback}；LLM erro字段: {llm_erro}"
+                    logger.warning(f"DM输出解析失败(第{attempt}次): {error_feedback}")
+                    continue
+
+                validation_error = self._validate_output(output, game_state)
+                if not validation_error:
+                    return output
+
+                llm_erro = str(data.get("erro", "")).strip()
+                error_feedback = validation_error
+                if llm_erro:
+                    error_feedback = f"{error_feedback}；LLM erro字段: {llm_erro}"
+                logger.warning(f"DM输出校验失败(第{attempt}次): {error_feedback}")
+
+            return self._create_fallback_output(player_input, f"DM输出校验失败: {error_feedback}")
+
         except Exception as e:
             logger.error(f"解析意图时发生异常: {e}")
             return self._create_fallback_output(player_input, str(e))
+
+    def _append_error_feedback(self, prompt: str, error_feedback: str) -> str:
+        """将系统错误反馈追加到Prompt，用于引导LLM纠正输出。"""
+        if not error_feedback:
+            return prompt
+
+        return (
+            f"{prompt}\n\n"
+            "---\n\n"
+            "## 系统错误反馈（erro）\n\n"
+            f"{error_feedback}\n\n"
+            "请根据以上错误反馈修正输出，确保check_attributes只使用当前规则支持的属性字段。"
+        )
+
+    def _validate_output(self, output: DMAgentOutput, game_state: Optional[GameState]) -> Optional[str]:
+        """校验DM输出与规则系统兼容性，返回错误信息或None。"""
+        if not output.needs_check:
+            return None
+
+        if not output.check_attributes:
+            return "needs_check=true 时 check_attributes 不能为空"
+
+        if not game_state:
+            return None
+
+        player = game_state.get_player()
+        if not player:
+            return None
+
+        invalid_attrs = [
+            attr for attr in output.check_attributes
+            if get_attribute_value(player, str(attr)) is None
+        ]
+        if invalid_attrs:
+            return (
+                f"check_attributes 存在规则不支持的属性: {invalid_attrs}。"
+                "当前支持: str/con/siz/dex/app/int/pow/edu/hp/san/lucky/luck"
+            )
+
+        return None
+
+    def _parse_output_strict(
+        self,
+        data: Dict[str, Any],
+        original_input: str
+    ) -> DMAgentOutput:
+        """严格解析LLM输出为DMAgentOutput对象，错误将抛出给上层重试逻辑。"""
+        is_dialogue = data.get("is_dialogue", False)
+
+        return DMAgentOutput(
+            is_dialogue=is_dialogue,
+            response_to_player=data.get("response_to_player", ""),
+            needs_check=data.get("needs_check", False),
+            check_type=data.get("check_type"),
+            check_attributes=data.get("check_attributes", []),
+            check_target=data.get("check_target"),
+            difficulty=data.get("difficulty", "常规"),
+            action_description=data.get("action_description", original_input),
+            npc_response_needed=data.get("npc_response_needed", False),
+            npc_actor_id=data.get("npc_actor_id"),
+            npc_intent=data.get("npc_intent"),
+        )
     
     def _build_game_context(self, game_state: Optional[GameState]) -> Dict[str, Any]:
         """
@@ -303,7 +406,8 @@ class DMAgent:
         system_prompt: str,
         player_input: str,
         game_context: Dict[str, Any],
-        dialogue_history: List[str]
+        dialogue_history: List[str],
+        additional_context: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         构建完整的Prompt
@@ -324,6 +428,34 @@ class DMAgent:
         history_text = ""
         if dialogue_history:
             history_text = "## 对话历史\n" + "\n".join(dialogue_history) + "\n\n"
+
+        extra_blocks: List[str] = []
+        if additional_context:
+            if additional_context.get("npc_response_mode"):
+                extra_blocks.append(f"## NPC响应模式\n{additional_context['npc_response_mode']}")
+            if additional_context.get("npc_response_policy"):
+                extra_blocks.append(f"## NPC模式策略\n{additional_context['npc_response_policy']}")
+            if additional_context.get("npc_prelude"):
+                extra_blocks.append(f"## 本轮前置NPC行动\n{additional_context['npc_prelude']}")
+            if additional_context.get("action_queue"):
+                extra_blocks.append(
+                    "## 当前行动队列快照\n"
+                    + json.dumps(additional_context["action_queue"], ensure_ascii=False)
+                )
+            if additional_context.get("current_actor_id"):
+                extra_blocks.append(f"## 当前行动者\n{additional_context['current_actor_id']}")
+            if additional_context.get("engine_context"):
+                extra_blocks.append(
+                    "## 引擎补充上下文\n"
+                    + json.dumps(additional_context["engine_context"], ensure_ascii=False, indent=2)
+                )
+            if additional_context.get("player_check_result"):
+                extra_blocks.append(
+                    "## 本轮玩家检定\n"
+                    + json.dumps(additional_context["player_check_result"], ensure_ascii=False, indent=2)
+                )
+
+        extra_text = "\n\n".join(extra_blocks)
         
         # 组合完整提示词
         prompt = f"""{system_prompt}
@@ -333,6 +465,8 @@ class DMAgent:
 {context_text}
 
 {history_text}
+{extra_text}
+
 ## 玩家输入
 
 "{player_input}"
@@ -420,19 +554,7 @@ class DMAgent:
             DMAgentOutput对象
         """
         try:
-            # 确保必填字段存在
-            is_dialogue = data.get("is_dialogue", False)
-            
-            output = DMAgentOutput(
-                is_dialogue=is_dialogue,
-                response_to_player=data.get("response_to_player", ""),
-                needs_check=data.get("needs_check", False),
-                check_type=data.get("check_type"),
-                check_attributes=data.get("check_attributes", []),
-                check_target=data.get("check_target"),
-                difficulty=data.get("difficulty", "常规"),
-                action_description=data.get("action_description", original_input)
-            )
+            output = self._parse_output_strict(data, original_input)
             
             logger.debug(f"意图解析完成: is_dialogue={output.is_dialogue}, needs_check={output.needs_check}")
             return output
@@ -465,8 +587,11 @@ class DMAgent:
             check_type=None,
             check_attributes=[],
             check_target=None,
-            difficulty="常规",
-            action_description=player_input
+            difficulty=None,
+            action_description=player_input,
+            npc_response_needed=False,
+            npc_actor_id=None,
+            npc_intent=None,
         )
     
     def quick_parse(
@@ -513,7 +638,6 @@ class DMAgent:
             response = self.llm_service.call_llm_json(
                 prompt=prompt,
                 schema=DMAGENT_OUTPUT_SCHEMA,
-                temperature=0.3
             )
             
             if response.get("success"):

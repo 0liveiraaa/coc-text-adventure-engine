@@ -312,6 +312,17 @@ class StateEvolution:
                 "description": current_map.description.get_public_text(),
             }
             
+            # 添加邻居地图信息（包含正确ID，防止LLM幻觉）
+            if current_map.neighbors:
+                context["available_exits"] = [
+                    {
+                        "map_id": neighbor.id,
+                        "direction": neighbor.direction,
+                        "description": neighbor.description
+                    }
+                    for neighbor in current_map.neighbors
+                ]
+            
             # 获取场景中的角色
             for char_id in current_map.entities.characters:
                 char = game_state.characters.get(char_id)
@@ -406,6 +417,22 @@ class StateEvolution:
         
         # 格式化鉴定结果
         check_text = self._format_check_result(check_result)
+
+        mode = str(game_context.get("npc_response_mode", "queue") or "queue")
+        policy = str(game_context.get("npc_response_policy", "") or "")
+        npc_response_expected = bool(game_context.get("npc_response_expected", False))
+        npc_actor_id = str(game_context.get("npc_response_actor_id", "") or "")
+
+        runtime_lines = [
+            "## 玩家推演运行时上下文",
+            f"- mode: {mode}",
+            f"- npc_response_expected: {'true' if npc_response_expected else 'false'}",
+        ]
+        if npc_actor_id:
+            runtime_lines.append(f"- npc_response_actor_id: {npc_actor_id}")
+        if policy:
+            runtime_lines.append(f"- policy: {policy}")
+        runtime_text = "\n".join(runtime_lines)
         
         prompt = f"""{self.system_prompt}
 
@@ -420,6 +447,8 @@ class StateEvolution:
 **行动描述**: {action_description}
 
 {check_text}
+
+{runtime_text}
 
 ## 结局条件
 
@@ -456,6 +485,24 @@ class StateEvolution:
         # NPC意图文本
         intent_text = f"**NPC意图**: {npc_intent}\n" if npc_intent else ""
         check_text = self._format_check_result(check_result)
+        mode = str(game_context.get("npc_response_mode", "queue") or "queue")
+        trigger = str(game_context.get("trigger", "queue") or "queue")
+        policy = str(game_context.get("npc_response_policy", "") or "")
+        player_action = str(game_context.get("player_action_description", "") or "")
+        player_check = game_context.get("player_check_result")
+
+        runtime_lines = [
+            "## NPC响应运行时上下文",
+            f"- mode: {mode}",
+            f"- trigger: {trigger}",
+        ]
+        if policy:
+            runtime_lines.append(f"- policy: {policy}")
+        if player_action:
+            runtime_lines.append(f"- 本轮玩家行动: {player_action}")
+        if player_check:
+            runtime_lines.append("- 本轮玩家检定:\n" + json.dumps(player_check, ensure_ascii=False, indent=2))
+        runtime_text = "\n".join(runtime_lines)
         
         prompt = f"""{self.system_prompt}
 
@@ -467,6 +514,8 @@ class StateEvolution:
 
 {intent_text}
 
+{runtime_text}
+
 ## NPC检定信息
 
 {check_text}
@@ -474,6 +523,8 @@ class StateEvolution:
 ## 说明
 
 请根据NPC的性格、当前状态和情境，推演NPC的行动。
+当 mode=queue 且 trigger=queue 时：聚焦NPC前置行动，不要重复复述玩家行动。
+当 mode=reactive 且 trigger=reactive 时：将NPC行动作为对本轮玩家行动的追响应答。
 在narrative中描述NPC的行动，在npc_action中简洁概括NPC的行动。
 返回的changes应反映NPC行动带来的状态变更。
 
@@ -544,7 +595,15 @@ class StateEvolution:
             lines.append(f"- 名称: {location.get('name', '未知')}")
             lines.append(f"- 描述: {location.get('description', '无')}")
         
-        # 场景中的角色 
+        # 可用出口（防止LLM使用错误的地图ID）
+        exits = game_context.get("available_exits", [])
+        if exits:
+            lines.append(f"\n### 可用出口（变更位置时必须使用以下准确ID）")
+            for exit_info in exits:
+                lines.append(f"- **{exit_info.get('direction', '未知')}**: {exit_info.get('description', '')}")
+                lines.append(f"  - 目标地图ID: `{exit_info.get('map_id')}`")
+        
+        # 场景中的角色
         characters = game_context.get("current_characters", [])
         if characters:
             lines.append(f"\n### 场景中的角色")
@@ -643,7 +702,6 @@ class StateEvolution:
                 response = self.llm_service.call_llm_json(
                     prompt=prompt_with_feedback,
                     schema=STATE_EVOLUTION_OUTPUT_SCHEMA,
-                    temperature=0.7  # 使用较高温度以获得更丰富的叙事
                 )
 
                 if not response.get("success"):
@@ -788,10 +846,30 @@ class StateEvolution:
                 pass
             elif change.operation == ChangeOperation.ADD:
                 # ADD操作通常用于列表类型的字段
-                pass
+                if entity_id.startswith("char-") and field == "inventory":
+                    if not isinstance(change.value, str):
+                        errors.append(f"{prefix}: inventory ADD 的value必须是物品ID字符串")
+                    elif change.value not in game_state.items:
+                        errors.append(f"{prefix}: inventory ADD 物品不存在 '{change.value}'")
             elif change.operation == ChangeOperation.UPDATE:
                 # UPDATE操作需要有值
                 if change.value is None:
                     errors.append(f"{prefix}: UPDATE操作需要value")
+
+                if entity_id.startswith("char-") and field == "inventory":
+                    if not isinstance(change.value, list):
+                        errors.append(f"{prefix}: inventory UPDATE 的value必须是列表")
+                    else:
+                        for item_id in change.value:
+                            if item_id not in game_state.items:
+                                errors.append(f"{prefix}: inventory UPDATE 包含不存在物品 '{item_id}'")
+
+                if field == "location" and isinstance(change.value, str):
+                    if entity_id.startswith("char-") and change.value not in game_state.maps:
+                        errors.append(f"{prefix}: 角色目标位置不存在 '{change.value}'")
+                    if entity_id.startswith("item-") and (
+                        change.value not in game_state.maps and change.value not in game_state.characters
+                    ):
+                        errors.append(f"{prefix}: 物品目标位置不存在 '{change.value}'")
         
         return errors

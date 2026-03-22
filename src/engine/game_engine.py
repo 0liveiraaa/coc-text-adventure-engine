@@ -50,7 +50,8 @@ class GameEngine:
         dm_agent: Optional[DMAgent] = None,
         rule_system: Optional[RuleSystem] = None,
         state_agent: Optional[StateEvolutionAgent] = None,
-        db_path: str = "data/game.db"
+        db_path: str = "data/game.db",
+        npc_response_mode: str = "queue",
     ):
         """
         初始化游戏引擎
@@ -80,6 +81,8 @@ class GameEngine:
         # 回合管理
         self._action_queue: List[str] = []  # 可行动角色队列
         self._current_actor_id: Optional[str] = None  # 当前行动角色
+        self._npc_response_mode: str = "queue"
+        self.set_npc_response_mode(npc_response_mode)
         
         # 世界配置（可被外部加载器覆盖）
         self.world_name = "default"
@@ -120,7 +123,11 @@ class GameEngine:
                 world_name=world_name
             )
             self.game_state = bundle.game_state
-            self.apply_world_settings(bundle.world_name, bundle.end_condition)
+            self.apply_world_settings(
+                bundle.world_name,
+                bundle.end_condition,
+                bundle.npc_response_mode,
+            )
             
             # 初始化回合
             self.game_state.turn_count = 1
@@ -208,10 +215,17 @@ class GameEngine:
         target_world = self.world_name if self.world_name else "mysterious_library"
         self.new_game(target_world)
 
-    def apply_world_settings(self, world_name: str, end_condition: str):
+    def apply_world_settings(
+        self,
+        world_name: str,
+        end_condition: str,
+        npc_response_mode: Optional[str] = None,
+    ):
         """应用世界级配置（例如来自world.json）。"""
         self.world_name = world_name
         self.end_condition = end_condition or self.end_condition
+        if npc_response_mode:
+            self.set_npc_response_mode(npc_response_mode)
         # 让状态推演系统共享同一结局条件
         self.state_agent.end_condition = self.end_condition
         self._load_ending_rules()
@@ -306,7 +320,9 @@ class GameEngine:
                     result["response"] = input_result.direct_response or "未知指令"
                     return result
 
-            npc_prelude = self._process_npc_turns_until_player()
+            npc_prelude = {"game_over": False, "narrative": ""}
+            if self._npc_response_mode == "queue":
+                npc_prelude = self._process_npc_turns_until_player()
             npc_prelude_text = (npc_prelude.get("narrative") or "").strip()
             if npc_prelude.get("game_over"):
                 result["game_over"] = True
@@ -317,7 +333,10 @@ class GameEngine:
             natural_input = input_result.natural_input
             
             # ===== Step 3: DM Agent解析 =====
-            dm_output = self._dm_agent_parse(natural_input)
+            dm_output = self._dm_agent_parse(
+                natural_input,
+                npc_prelude_text=npc_prelude_text,
+            )
             
             # 如果是纯对话，直接回复
             if dm_output.is_dialogue:
@@ -349,6 +368,27 @@ class GameEngine:
             # ===== Step 6: 应用状态变更 =====
             if evolution_result.changes:
                 self._apply_changes(evolution_result.changes)
+
+            # 响应模式：由DM决定是否触发NPC在本轮追响应答。
+            if self._npc_response_mode == "reactive":
+                npc_follow = self._process_reactive_npc_response(
+                    dm_output=dm_output,
+                    player_check=check_output,
+                )
+
+                npc_text = (npc_follow.get("narrative") or "").strip()
+                if npc_text:
+                    if result["narrative"]:
+                        result["narrative"] = f"{result['narrative']}\n{npc_text}"
+                    else:
+                        result["narrative"] = npc_text
+
+                if npc_follow.get("game_over"):
+                    self._is_game_over = True
+                    result["game_over"] = True
+                    end_text = npc_follow.get("ending") or ""
+                    if end_text:
+                        result["narrative"] = f"{result['narrative']}\n\n{end_text}" if result["narrative"] else end_text
             
             # 更新玩家current_event
             player = self.game_state.get_player()
@@ -441,7 +481,7 @@ class GameEngine:
                 npc_id=actor.id,
                 game_state=self.game_state,
                 check_result=npc_check,
-                additional_context={"engine_context": self._build_game_context()}
+                additional_context=self._build_npc_runtime_context(trigger="queue")
             )
 
             if npc_output.changes:
@@ -483,7 +523,7 @@ class GameEngine:
             logger.warning(f"NPC检定失败，回退为无检定推演: actor={actor.id}, err={e}")
             return None
     
-    def _dm_agent_parse(self, player_input: str) -> DMAgentOutput:
+    def _dm_agent_parse(self, player_input: str, npc_prelude_text: str = "") -> DMAgentOutput:
         """
         DM Agent解析 - Step 3
         
@@ -496,11 +536,71 @@ class GameEngine:
         # 调用DM Agent（由DM内部构建上下文）
         dm_output = self.dm_agent.parse_intent(
             player_input=player_input,
-            game_state=self.game_state
+            game_state=self.game_state,
+            additional_context=self._build_dm_additional_context(npc_prelude_text=npc_prelude_text)
         )
         
         logger.debug(f"DM Agent解析结果: needs_check={dm_output.needs_check}")
         return dm_output
+
+    def _process_reactive_npc_response(
+        self,
+        dm_output: DMAgentOutput,
+        player_check: Optional[CheckOutput],
+    ) -> Dict[str, Any]:
+        """响应式NPC流程：仅在DM判定需要时触发。"""
+        if not hasattr(self.state_agent, "evolve_npc_action"):
+            return {"game_over": False, "narrative": ""}
+
+        if not dm_output.npc_response_needed:
+            return {"game_over": False, "narrative": ""}
+
+        npc_id = dm_output.npc_actor_id or self._pick_default_npc_actor()
+        if not npc_id:
+            logger.debug("响应模式已开启，但未找到可响应NPC")
+            return {"game_over": False, "narrative": ""}
+
+        npc = self.game_state.characters.get(npc_id)
+        if not npc or npc.is_player or not self._can_actor_act(npc):
+            return {"game_over": False, "narrative": ""}
+
+        npc_check = self._execute_npc_check(npc)
+        npc_output = self.state_agent.evolve_npc_action(
+            npc_id=npc.id,
+            game_state=self.game_state,
+            check_result=npc_check,
+            npc_intent=dm_output.npc_intent,
+            additional_context=self._build_npc_runtime_context(
+                trigger="reactive",
+                player_check=player_check,
+                player_action_description=dm_output.action_description,
+            ),
+        )
+
+        if npc_output.changes:
+            self._apply_changes(npc_output.changes)
+
+        return {
+            "game_over": npc_output.is_end,
+            "narrative": f"[{npc.name}] {npc_output.narrative}" if npc_output.narrative else "",
+            "ending": npc_output.end_narrative,
+        }
+
+    def _pick_default_npc_actor(self) -> Optional[str]:
+        """在响应模式下兜底选取一个同场景可行动NPC。"""
+        player = self.game_state.get_player()
+        if not player:
+            return None
+
+        for char_id, char in self.game_state.characters.items():
+            if char.is_player:
+                continue
+            if char.location != player.location:
+                continue
+            if self._can_actor_act(char):
+                return char_id
+
+        return None
     
     def _execute_check(self, dm_output: DMAgentOutput) -> CheckOutput:
         """
@@ -562,7 +662,15 @@ class GameEngine:
             check_result=check_result,
             action_description=dm_output.action_description,
             game_state=self.game_state,
-            additional_context={"engine_context": self._build_game_context()}
+            additional_context={
+                "engine_context": self._build_game_context(),
+                "npc_response_mode": self._npc_response_mode,
+                "npc_response_policy": self._describe_npc_mode_policy(),
+                "npc_response_expected": bool(
+                    self._npc_response_mode == "reactive" and dm_output.npc_response_needed
+                ),
+                "npc_response_actor_id": dm_output.npc_actor_id,
+            }
         )
         
         logger.debug(f"状态推演完成，变更数: {len(evolution_output.changes)}")
@@ -641,6 +749,14 @@ class GameEngine:
         elif change.id in self.game_state.maps:
             map_obj = self.game_state.maps[change.id]
             self._update_entity_field(map_obj, change.field, change.value, change.operation)
+
+        if (
+            change.id == self.game_state.player_id
+            and change.operation == ChangeOperation.UPDATE
+            and change.field == "location"
+            and isinstance(change.value, str)
+        ):
+            self.game_state.current_scene_id = change.value
     
     def _update_entity_field(self, entity: Any, field: str, value: Any, operation: ChangeOperation):
         """按操作类型更新实体字段。"""
@@ -710,6 +826,54 @@ class GameEngine:
     def _refresh_action_queue(self, last_actor_id: Optional[str] = None):
         """刷新行动队列。"""
         self._action_queue = self._build_dynamic_action_queue(last_actor_id=last_actor_id)
+
+    def _build_dm_additional_context(self, npc_prelude_text: str = "") -> Dict[str, Any]:
+        """构建DM解析用的动态上下文。"""
+        context: Dict[str, Any] = {
+            "npc_response_mode": self._npc_response_mode,
+            "npc_response_policy": self._describe_npc_mode_policy(),
+            "engine_context": self._build_game_context(),
+            "action_queue": self._action_queue,
+            "current_actor_id": self._current_actor_id,
+        }
+        if npc_prelude_text:
+            context["npc_prelude"] = npc_prelude_text
+        return context
+
+    def _build_npc_runtime_context(
+        self,
+        trigger: str,
+        player_check: Optional[CheckOutput] = None,
+        player_action_description: str = "",
+    ) -> Dict[str, Any]:
+        """构建NPC推演用的动态上下文，支持queue/reactive双模式。"""
+        context: Dict[str, Any] = {
+            "engine_context": self._build_game_context(),
+            "trigger": trigger,
+            "npc_response_mode": self._npc_response_mode,
+            "npc_response_policy": self._describe_npc_mode_policy(),
+            "action_queue": self._action_queue,
+            "current_actor_id": self._current_actor_id,
+        }
+        if player_check:
+            context["player_check_result"] = player_check.model_dump()
+        if player_action_description:
+            context["player_action_description"] = player_action_description
+        return context
+
+    def _describe_npc_mode_policy(self) -> str:
+        """返回当前NPC响应模式的策略说明，供Agent动态拼接上下文。"""
+        if self._npc_response_mode == "reactive":
+            return "reactive: 不执行玩家前置NPC队列；由DM输出的npc_response_*字段决定是否触发本轮NPC追响应答。"
+        return "queue: 玩家输入前最多执行1个NPC前置回合；DM输出的npc_response_*字段只作参考，不直接驱动执行。"
+
+    def set_npc_response_mode(self, mode: str):
+        """设置NPC响应模式：queue(前置队列) / reactive(按需响应)。"""
+        normalized = (mode or "queue").strip().lower()
+        if normalized not in {"queue", "reactive"}:
+            logger.warning(f"未知NPC响应模式: {mode}，回退为queue")
+            normalized = "queue"
+        self._npc_response_mode = normalized
 
     def _build_dynamic_action_queue(self, last_actor_id: Optional[str] = None) -> List[str]:
         """按可行动性与优先级动态构建行动队列。"""

@@ -180,6 +180,12 @@ class CheckResult(str, Enum):
     FUMBLE = "大失败"
 
 
+class NpcResponseMode(str, Enum):
+    """NPC响应模式。"""
+    QUEUE = "queue"
+    REACTIVE = "reactive"
+
+
 class CheckInput(BaseModel):
     """规则系统输入"""
     check_type: CheckType = Field(..., description="鉴定类型")
@@ -208,6 +214,8 @@ class DMAgentInput(BaseModel):
     player_input: str = Field(..., description="玩家输入")
     dialogue_history: List[str] = Field(default_factory=list, description="对话历史")
     game_context: Dict[str, Any] = Field(default_factory=dict, description="游戏上下文")
+    npc_response_mode: NpcResponseMode = Field(default=NpcResponseMode.QUEUE, description="NPC响应模式")
+    additional_context: Dict[str, Any] = Field(default_factory=dict, description="引擎附加上下文")
 
 
 class DMAgentOutput(BaseModel):
@@ -218,8 +226,11 @@ class DMAgentOutput(BaseModel):
     check_type: Optional[str] = Field(default=None, description="鉴定类型")
     check_attributes: List[str] = Field(default_factory=list, description="鉴定属性")
     check_target: Optional[str] = Field(default=None, description="对抗目标ID")
-    difficulty: str = Field(default="常规", description="非对抗鉴定难度")
+    difficulty: Optional[str] = Field(default=None, description="非对抗鉴定难度")
     action_description: str = Field(default="", description="行动的自然语言描述")
+    npc_response_needed: bool = Field(default=False, description="是否需要NPC响应")
+    npc_actor_id: Optional[str] = Field(default=None, description="需要响应的NPC ID")
+    npc_intent: Optional[str] = Field(default=None, description="NPC响应意图描述")
 
 
 # ============================================================
@@ -236,6 +247,8 @@ class StateEvolutionInput(BaseModel):
     is_npc_action: bool = Field(default=False, description="是否为NPC行动")
     npc_intent: Optional[str] = Field(default=None, description="NPC意图")
     npc_info: Optional[Dict[str, Any]] = Field(default=None, description="NPC信息")
+    npc_response_mode: NpcResponseMode = Field(default=NpcResponseMode.QUEUE, description="NPC响应模式")
+    trigger_source: str = Field(default="", description="触发来源：queue或reactive")
 
 
 class StateEvolutionOutput(BaseModel):
@@ -271,6 +284,12 @@ class GameState(BaseModel):
     
     def get_current_map(self) -> Optional[Map]:
         """获取当前地图"""
+        player = self.get_player()
+        if player and player.location:
+            found = self.maps.get(player.location)
+            if found:
+                return found
+
         if self.current_scene_id:
             return self.maps.get(self.current_scene_id)
         return None
@@ -300,6 +319,7 @@ __all__ = [
     "CheckType",
     "CheckDifficulty",
     "CheckResult",
+    "NpcResponseMode",
     "CheckInput",
     "CheckOutput",
     # DM Agent

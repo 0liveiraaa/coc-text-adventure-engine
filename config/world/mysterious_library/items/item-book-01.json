@@ -9,6 +9,6 @@
     ],
     "hint": "书中记载了图书馆地下密室的传说，提到那里藏有不可告人的秘密。阅读需要进行理智检定。"
   },
-  "location": "char-player-01",
+  "location": "map-room-library-01",
   "is_portable": true
 }

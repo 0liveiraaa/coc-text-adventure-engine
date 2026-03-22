@@ -84,6 +84,8 @@ class LLMConfig:
     temperature: float = 0.7
     max_tokens: Optional[int] = None
     timeout: float = 60.0
+    enable_thinking: bool = True  # 是否启用思考模式
+    structured_output: bool = False  # 是否启用结构化输出
     
     @classmethod
     def from_sources(cls, config_path: str = "config/llm.json") -> "LLMConfig":
@@ -124,6 +126,16 @@ class LLMConfig:
             timeout = float(timeout_env)
         else:
             timeout = float(file_data.get("timeout", 60.0))
+        
+        # 思考模式设置（默认True，可从配置或环境变量关闭）
+        enable_thinking = file_data.get("enable_thinking", True)
+        if os.getenv("LLM_ENABLE_THINKING") is not None:
+            enable_thinking = os.getenv("LLM_ENABLE_THINKING").lower() in ("true", "1", "yes")
+        
+        # 结构化输出设置
+        structured_output = file_data.get("structured_output", False)
+        if os.getenv("LLM_STRUCTURED_OUTPUT") is not None:
+            structured_output = os.getenv("LLM_STRUCTURED_OUTPUT").lower() in ("true", "1", "yes")
 
         return cls(
             api_key=api_key,
@@ -132,6 +144,8 @@ class LLMConfig:
             temperature=temperature,
             max_tokens=max_tokens,
             timeout=timeout,
+            enable_thinking=enable_thinking,
+            structured_output=structured_output,
         )
 
 
@@ -288,6 +302,13 @@ class LLMService:
             # 合并额外参数
             api_params.update({k: v for k, v in kwargs.items() if k not in api_params})
             
+            # 根据配置设置思考模式（通过extra_body）
+            enable_thinking = kwargs.get("enable_thinking", self.config.enable_thinking)
+            if "extra_body" not in api_params:
+                api_params["extra_body"] = {"enable_thinking": enable_thinking}
+            elif "enable_thinking" not in api_params.get("extra_body", {}):
+                api_params["extra_body"]["enable_thinking"] = enable_thinking
+            
             # 调用API
             response = self.client.chat.completions.create(**api_params)
             
@@ -371,10 +392,22 @@ class LLMService:
                 f"{correction_hint}"
             )
 
+            # 如果配置启用了结构化输出，使用 json_schema 响应格式
+            if self.config.structured_output:
+                response_format = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "structured_response",
+                        "schema": schema
+                    }
+                }
+            else:
+                response_format = {"type": "json_object"}
+            
             try:
                 result = self.call_llm(
                     json_instruction,
-                    response_format={"type": "json_object"},
+                    response_format=response_format,
                     max_retries=max_retries,
                     **kwargs
                 )
@@ -457,6 +490,13 @@ class LLMService:
             
             # 合并额外参数
             api_params.update({k: v for k, v in kwargs.items() if k not in api_params})
+            
+            # 根据配置设置思考模式
+            enable_thinking = kwargs.get("enable_thinking", self.config.enable_thinking)
+            if "extra_body" not in api_params:
+                api_params["extra_body"] = {"enable_thinking": enable_thinking}
+            elif "enable_thinking" not in api_params.get("extra_body", {}):
+                api_params["extra_body"]["enable_thinking"] = enable_thinking
             
             # 调用API
             response = self.client.chat.completions.create(**api_params)

@@ -1,5 +1,5 @@
 # 代码审查问题总结
-
+我的建议:一致性解决:io系统中完成,对id的位置和状态保障一致性,agent不负责,agent只需要提供id,变更类型,值即可
 ## 审查时间
 2026-03-21
 
@@ -12,51 +12,7 @@
 
 ## 发现问题清单
 
-### 1. 对话循环问题 ⭐⭐⭐
 
-**状态**: 设计缺陷
-
-**描述**: 当 DM Agent 判定玩家输入为纯对话 (`is_dialogue=True`) 时，直接返回而不推进回合。
-
-**代码位置**: `src/engine/game_engine.py` 第322-328行
-
-**影响**:
-- 玩家可以无限对话而不消耗行动
-- NPC 行动队列被卡住，无法获得行动机会
-- 回合计数不准确
-
-**修复建议**:
-```python
-if dm_output.is_dialogue:
-    result["response"] = dm_output.response_to_player
-    # ...
-    self._turn_end(resolved=True)  # 添加：对话也推进回合
-    return result
-```
-
----
-
-### 2. 属性鉴定机制问题 ⭐⭐⭐
-
-**状态**: 已修复
-
-**描述**: 属性鉴定时没有应用 COC 标准的 ×5 倍数，导致成功率只有预期的 1/5。
-
-**代码位置**: `src/rule/rule_system.py` 第87-133行
-
-**修复内容**:
-```python
-# 检查主属性
-if attr_lower in main_attributes:
-    base_value = getattr(character.attributes, main_attributes[attr_lower], None)
-    return base_value * 5 if base_value is not None else None  # 添加 ×5
-```
-
-**效果**:
-- STR 12 → 成功率从 12% 提升到 60%
-- DEX 13 → 成功率从 13% 提升到 65%
-
----
 
 ### 3. 对抗鉴定结果展示问题 ⭐⭐
 
@@ -145,25 +101,7 @@ description.public Input should be a valid list
 
 ---
 
-### 6. 指令系统与 Agent 隔离 ✅
 
-**状态**: 符合设计
-
-**描述**: `\` 开头的指令无论如何都不会调用 DM Agent，完全由本地指令系统处理。
-
-**代码验证**:
-```python
-# InputSystem.parse_input()
-if user_input.startswith("\\"):
-    return self._parse_command(user_input[1:])  # 直接返回指令结果
-
-# GameEngine.process_input()
-if input_result.input_type == InputType.BASIC_COMMAND:
-    # 直接处理，不进入 DM Agent 流程
-    return result
-```
-
-**结论**: 这是符合预期的设计，非 Bug。
 
 ---
 
@@ -293,26 +231,9 @@ StateChange(
     operation=ChangeOperation.UPDATE,
     value="map-room-corridor-01"  # 目标地图ID
 )
-```
 
-**修复方案**:
 
-**方案1：添加移动指令**（推荐）
-```python
-# 添加到 BASIC_COMMANDS
-"go": "移动到指定方向或位置",
-"move": "移动到指定方向或位置",
 
-# 实现 _cmd_go
-```
-
-**方案2：优化 StateEvolution 提示词**
-在提示词中明确说明：当玩家移动时，必须生成 `location` 字段的 UPDATE 变更。
-
-**方案3：在 DMAgent 中检测移动意图**
-DMAgent 识别移动意图后，自动生成 location 变更，不依赖 StateEvolution。
-
----
 
 ### 10. 位置系统不一致 ⭐⭐⭐
 
@@ -351,22 +272,6 @@ def get_current_map(self) -> Optional[Map]:
 - 而不是 `player.location`
 - 当玩家"移动"时，StateEvolution 可能只更新了 `player.location`
 - 但没有更新 `game_state.current_scene_id`
-
-**修复方案**:
-
-**方案1**: `get_current_map()` 改为基于玩家位置
-```python
-def get_current_map(self) -> Optional[Map]:
-    player = self.get_player()
-    if player and player.location:
-        return self.maps.get(player.location)
-    return None
-```
-
-**方案2**: 移动时同时更新两个值
-在 StateEvolution 生成变更时，同时更新：
-- `player.location`
-- `game_state.current_scene_id`
 
 ---
 

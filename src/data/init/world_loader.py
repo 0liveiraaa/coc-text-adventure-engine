@@ -25,6 +25,7 @@ class WorldBundle:
     game_state: GameState
     world_name: str
     end_condition: str
+    npc_response_mode: str = "queue"
 
 
 class WorldLoader:
@@ -88,7 +89,8 @@ class WorldLoader:
         return WorldBundle(
             game_state=game_state,
             world_name=self.world_name,
-            end_condition=self.manifest.get("end_condition", "玩家死亡或达成剧情结局")
+            end_condition=self.manifest.get("end_condition", "玩家死亡或达成剧情结局"),
+            npc_response_mode=self._resolve_npc_response_mode(),
         )
 
     def load_world_from_config(
@@ -379,6 +381,12 @@ class WorldLoader:
             npc_ids = [cid for cid in self._characters.keys() if cid != player_id]
             return [player_id] + npc_ids
         return list(self._characters.keys())
+
+    def _resolve_npc_response_mode(self) -> str:
+        configured = str(self.manifest.get("npc_response_mode", "queue") or "queue").strip().lower()
+        if configured in {"queue", "reactive"}:
+            return configured
+        return "queue"
     
     def get_character(self, char_id: str) -> Optional[Character]:
         """获取指定角色"""

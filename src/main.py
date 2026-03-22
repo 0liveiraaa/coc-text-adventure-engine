@@ -62,7 +62,7 @@ def parse_arguments():
         "--name", "-n",
         type=str,
         default=None,
-        help="玩家角色名称（已废弃，默认读取世界配置中的玩家定义）"
+        help="玩家角色名称（已废弃，默认读取世界配置中的玩家定义）" #修改建议:用不到就不要留在这里,不要留在这里了
     )
     
     parser.add_argument(
@@ -180,7 +180,8 @@ def _start_new_game(engine: GameEngine, args):
         engine.game_state = bundle.game_state
         engine.apply_world_settings(
             world_name=bundle.world_name,
-            end_condition=bundle.end_condition
+            end_condition=bundle.end_condition,
+            npc_response_mode=bundle.npc_response_mode,
         )
 
         if args.name:

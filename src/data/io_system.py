@@ -494,6 +494,13 @@ class IOSystem:
     
     def _do_update(self, entity: Any, field: str, value: Any, saver) -> int:
         """执行更新操作"""
+        if isinstance(entity, Character) and field == "inventory":
+            if not isinstance(value, list):
+                return ERROR_OPERATION_INVALID
+            for item_id in value:
+                if not isinstance(item_id, str) or not self.get_item(item_id):
+                    return ERROR_ID_NOT_FOUND
+
         parts = field.split(".")
         obj = entity
         
@@ -505,6 +512,14 @@ class IOSystem:
         
         last_part = parts[-1]
         if hasattr(obj, last_part):
+            # 特殊处理：防止 description.public 被错误地从列表替换为字典
+            if field == "description.public":
+                current_value = getattr(obj, last_part)
+                # 如果当前是列表，但新值是单个字典，则追加而不是替换
+                if isinstance(current_value, list) and isinstance(value, dict):
+                    current_value.append(value)
+                    result = saver(entity)
+                    return result if result is not None else ERROR_SUCCESS
             setattr(obj, last_part, value)
         else:
             return ERROR_FIELD_NOT_FOUND
@@ -514,6 +529,10 @@ class IOSystem:
     
     def _do_add(self, entity: Any, field: str, value: Any, saver) -> int:
         """执行添加操作（向数组添加元素）"""
+        if isinstance(entity, Character) and field == "inventory":
+            if not isinstance(value, str) or not self.get_item(value):
+                return ERROR_ID_NOT_FOUND
+
         parts = field.split(".")
         obj = entity
         
