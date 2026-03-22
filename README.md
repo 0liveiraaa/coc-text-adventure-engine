@@ -123,7 +123,7 @@ python -m unittest tests.test_regression_flow
 
 支持两种NPC响应模式：
 
-1. **queue模式(未完成不要选) :**玩家输入前先处理NPC回合
+1. **queue模式(未完成不要选)**: 玩家输入前先处理NPC回合
 2. **reactive模式（默认）**：由DM Agent决定是否触发NPC响应
 
 在 `config/llm.json` 中设置：
