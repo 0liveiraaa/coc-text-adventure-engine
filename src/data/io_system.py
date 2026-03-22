@@ -145,6 +145,36 @@ class IOSystem:
             if text:
                 normalized.append({"description": text})
         return normalized
+
+    @staticmethod
+    def _normalize_neighbors_value(value: Any) -> List[Dict[str, Any]]:
+        """Normalize map neighbor payloads to canonical dict shape."""
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = [value]
+        elif not isinstance(value, list):
+            value = [value]
+
+        normalized: List[Dict[str, Any]] = []
+        seen = set()
+        for entry in value:
+            if hasattr(entry, "model_dump"):
+                entry = entry.model_dump()
+            if isinstance(entry, dict):
+                neighbor_id = str(entry.get("id", "")).strip()
+                direction = str(entry.get("direction", "")).strip()
+                description = str(entry.get("description", "")).strip()
+                if neighbor_id and direction and neighbor_id not in seen:
+                    seen.add(neighbor_id)
+                    normalized.append(
+                        {
+                            "id": neighbor_id,
+                            "direction": direction,
+                            "description": description,
+                        }
+                    )
+        return normalized
     
     # ============================================================
     # 字符数据操作
@@ -718,6 +748,8 @@ class IOSystem:
         if hasattr(obj, last_part):
             if field == "description.public":
                 setattr(obj, last_part, self._normalize_public_description_value(value))
+            elif field == "neighbors":
+                setattr(obj, last_part, self._normalize_neighbors_value(value))
             else:
                 setattr(obj, last_part, value)
         else:
@@ -744,6 +776,8 @@ class IOSystem:
         if isinstance(obj, list):
             if field == "description.public":
                 obj.extend(self._normalize_public_description_value(value))
+            elif field == "neighbors":
+                obj.extend(self._normalize_neighbors_value(value))
             elif isinstance(value, list):
                 obj.extend(value)
             else:

@@ -14,10 +14,12 @@ from src.data.models import (
     ChangeOperation,
     Character,
     Item,
+    MapNeighbor,
     Map,
 )
 from src.agent.input_system import InputSystem, InputType
 from src.agent.state_evolution import StateEvolution
+from src.cli.game_cli import DisplayManager
 from src.engine.game_engine import GameEngine
 from src.utils.consistency_checker import ConsistencyChecker
 
@@ -627,6 +629,71 @@ class RegressionFlowTests(unittest.TestCase):
         )
 
         self.assertTrue(any("字段路径不存在" in error for error in errors))
+
+    def test_cli_print_scene_handles_legacy_dict_neighbors(self):
+        bundle = load_initial_world_bundle(FakeIO(), player_name="娴嬭瘯鑰?", world_name="mysterious_library")
+        display = DisplayManager()
+        game_state = bundle.game_state
+        current_map = game_state.get_current_map()
+        self.assertIsNotNone(current_map)
+
+        current_map.__dict__["neighbors"] = [
+            {"id": "map-room-corridor-01", "direction": "北", "description": "通往走廊的木门"}
+        ]
+
+        from io import StringIO
+        import contextlib
+
+        buffer = StringIO()
+        with contextlib.redirect_stdout(buffer):
+            display.print_scene(game_state)
+
+        output = buffer.getvalue()
+        self.assertIn("可通往", output)
+        self.assertIn("北", output)
+        self.assertIn("通往走廊的木门", output)
+
+    def test_sync_state_change_normalizes_neighbor_dicts(self):
+        bundle = load_initial_world_bundle(FakeIO(), player_name="娴嬭瘯鑰?", world_name="mysterious_library")
+        engine = GameEngine(
+            io_system=FakeIO(),
+            dm_agent=DummyDMAgent(),
+            state_agent=DummyStateAgent(),
+        )
+        engine.game_state = bundle.game_state
+        engine.apply_world_settings(bundle.world_name, bundle.end_condition)
+
+        engine._sync_state_change(
+            StateChange(
+                id="map-room-library-01",
+                field="neighbors",
+                operation=ChangeOperation.ADD,
+                value={"id": "map-room-secret-01", "direction": "西", "description": "通往密室"},
+            )
+        )
+
+        current_map = engine.game_state.maps["map-room-library-01"]
+        self.assertTrue(all(isinstance(neighbor, MapNeighbor) for neighbor in current_map.neighbors))
+        self.assertTrue(any(neighbor.direction == "西" for neighbor in current_map.neighbors))
+
+    def test_io_state_change_normalizes_neighbor_dicts(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            io = IOSystem(db_path=tmp_dir, mode="json")
+            map_obj = Map(id="map-01", name="测试地图")
+            self.assertEqual(io.save_map(map_obj), ERROR_SUCCESS)
+
+            change = StateChange(
+                id="map-01",
+                field="neighbors",
+                operation=ChangeOperation.ADD,
+                value={"id": "map-02", "direction": "北", "description": "通往北侧"},
+            )
+            self.assertEqual(io.apply_state_change(change), ERROR_SUCCESS)
+
+            reloaded = io.get_map("map-01")
+            self.assertIsNotNone(reloaded)
+            self.assertTrue(all(isinstance(neighbor, MapNeighbor) for neighbor in reloaded.neighbors))
+            self.assertEqual(reloaded.neighbors[0].direction, "北")
 
     def test_help_command_should_not_trigger_npc_prelude(self):
         bundle = load_initial_world_bundle(FakeIO(), player_name="娴嬭瘯鑰?", world_name="mysterious_library")

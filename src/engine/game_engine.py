@@ -18,7 +18,7 @@ from pathlib import Path
 
 from src.data.io_system import IOSystem
 from src.data.models import (
-    Character, Item, Map, GameState, StateChange, ChangeOperation,
+    Character, Item, Map, MapNeighbor, GameState, StateChange, ChangeOperation,
     DMAgentOutput, CheckInput, CheckOutput,
     StateEvolutionOutput,
     CheckType, CheckDifficulty
@@ -1041,10 +1041,15 @@ class GameEngine:
             target = getattr(current, final_field)
 
             if operation == ChangeOperation.UPDATE:
-                setattr(current, final_field, value)
+                if field == "neighbors":
+                    setattr(current, final_field, self._normalize_neighbors_value(value))
+                else:
+                    setattr(current, final_field, value)
             elif operation == ChangeOperation.ADD:
                 if isinstance(target, list):
-                    if isinstance(value, list):
+                    if field == "neighbors":
+                        target.extend(self._normalize_neighbors_value(value))
+                    elif isinstance(value, list):
                         target.extend(value)
                     else:
                         target.append(value)
@@ -1068,8 +1073,46 @@ class GameEngine:
             if field in {"entities.items", "entities.characters"}:
                 normalized = [x for x in self._flatten_entity_ids(getattr(current, final_field)) if isinstance(x, str)]
                 setattr(current, final_field, normalized)
+            elif field == "neighbors":
+                setattr(
+                    current,
+                    final_field,
+                    self._normalize_neighbors_value(getattr(current, final_field)),
+                )
         except AttributeError as e:
             logger.warning(f"更新字段失败: {field}, {e}")
+
+    def _normalize_neighbors_value(self, value: Any) -> List[MapNeighbor]:
+        """Normalize map neighbors to MapNeighbor objects."""
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = [value]
+        elif not isinstance(value, list):
+            value = [value]
+
+        normalized: List[MapNeighbor] = []
+        seen = set()
+        for entry in value:
+            if isinstance(entry, MapNeighbor):
+                neighbor = entry
+            elif isinstance(entry, dict):
+                try:
+                    neighbor = MapNeighbor(**entry)
+                except Exception:
+                    continue
+            elif hasattr(entry, "model_dump"):
+                try:
+                    neighbor = MapNeighbor(**entry.model_dump())
+                except Exception:
+                    continue
+            else:
+                continue
+
+            if neighbor.id and neighbor.id not in seen:
+                seen.add(neighbor.id)
+                normalized.append(neighbor)
+        return normalized
     
     def _turn_end(self, resolved: bool = True):
         """

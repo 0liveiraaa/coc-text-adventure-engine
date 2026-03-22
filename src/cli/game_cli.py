@@ -158,8 +158,26 @@ class DisplayManager:
         # 显示可通往的方向
         if current_map.neighbors:
             print(self.formatter.section("可通往"))
-            for neighbor in current_map.neighbors:
+            for neighbor in self._normalize_neighbors(current_map.neighbors):
                 print(f"  {self.formatter.highlight(neighbor.direction)}: {neighbor.description}")
+
+    def _normalize_neighbors(self, raw_neighbors):
+        """Accept both MapNeighbor objects and legacy dict payloads."""
+        normalized = []
+        for neighbor in raw_neighbors or []:
+            if hasattr(neighbor, "direction") and hasattr(neighbor, "description"):
+                normalized.append(neighbor)
+            elif isinstance(neighbor, dict):
+                direction = str(neighbor.get("direction", "")).strip()
+                description = str(neighbor.get("description", "")).strip()
+                if direction:
+                    normalized.append(
+                        type("NeighborView", (), {
+                            "direction": direction,
+                            "description": description,
+                        })()
+                    )
+        return normalized
     
     def print_characters(self, game_state: GameState):
         """打印场景中的角色"""

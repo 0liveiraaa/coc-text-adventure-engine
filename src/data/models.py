@@ -186,8 +186,32 @@ class Map(BaseModel):
     neighbors: List[MapNeighbor] = Field(default_factory=list, description="相邻地图")
     entities: MapEntities = Field(default_factory=MapEntities, description="地图上的实体")
 
+    @field_validator("neighbors", mode="before")
+    @classmethod
+    def _normalize_neighbors(cls, value: Any) -> List[MapNeighbor]:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = [value]
+        elif not isinstance(value, list):
+            value = [value]
+
+        normalized: List[MapNeighbor] = []
+        for entry in value:
+            if isinstance(entry, MapNeighbor):
+                normalized.append(entry)
+                continue
+            if isinstance(entry, dict):
+                try:
+                    normalized.append(MapNeighbor(**entry))
+                    continue
+                except Exception:
+                    pass
+        return normalized
+
     class Config:
         extra = "allow"
+        validate_assignment = True
 
 
 # ============================================================
