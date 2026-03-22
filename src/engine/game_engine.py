@@ -27,10 +27,15 @@ from src.agent.dm_agent import DMAgent
 from src.agent.state_evolution import StateEvolution as StateEvolutionAgent
 from src.data.init.world_loader import load_initial_world_bundle
 try:
-    from src.narrative import NarrativeContext, NarrativeEvent
+    from src.narrative import NarrativeContext, NarrativeContextSnapshot, NarrativeEvent
 except Exception:  # pragma: no cover - optional module
     NarrativeContext = None
+    NarrativeContextSnapshot = None
     NarrativeEvent = None
+try:
+    from src.npc import NPCDirector
+except Exception:  # pragma: no cover - optional module
+    NPCDirector = None
 from src.rule.rule_system import RuleSystem
 
 # 配置日志
@@ -83,6 +88,7 @@ class GameEngine:
         self._ending_text = ""  # 结局文本
         self._is_game_over = False
         self.narrative_context = self._create_narrative_context(window_size=narrative_window)
+        self.npc_director = self._create_npc_director()
         self.dm_dialogue_log: List[Dict[str, str]] = []  # DM与玩家对话记录
         self._pending_npc_action_plans: Dict[str, Any] = {}
         
@@ -139,6 +145,7 @@ class GameEngine:
                 bundle.world_name,
                 bundle.end_condition,
                 bundle.npc_response_mode,
+                bundle.narrative_window,
             )
             
             # 初始化回合
@@ -236,12 +243,15 @@ class GameEngine:
         world_name: str,
         end_condition: str,
         npc_response_mode: Optional[str] = None,
+        narrative_window: Optional[int] = None,
     ):
         """应用世界级配置（例如来自world.json）。"""
         self.world_name = world_name
         self.end_condition = end_condition or self.end_condition
         if npc_response_mode:
             self.set_npc_response_mode(npc_response_mode)
+        if narrative_window is not None:
+            self._set_narrative_window(narrative_window)
         # 让状态推演系统共享同一结局条件
         self.state_agent.end_condition = self.end_condition
         self._load_ending_rules()
@@ -496,6 +506,13 @@ class GameEngine:
                 self._turn_end(resolved=True)
                 self._turn_start()
                 continue
+
+            planned_actions = self._plan_npc_actions(
+                trigger="queue",
+                candidate_npc_ids=[actor.id],
+            )
+            if planned_actions:
+                self._pending_npc_action_plans.update(planned_actions)
 
             npc_check = self._execute_npc_check(actor)
             planned_action = self._pending_npc_action_plans.pop(actor.id, None)
@@ -871,6 +888,31 @@ class GameEngine:
         if NarrativeContext is None:
             return _NullNarrativeContext()
         return NarrativeContext(window_size=window_size)
+
+    def _set_narrative_window(self, window_size: int) -> None:
+        """Resize narrative window while preserving the current context payload."""
+        normalized = max(1, int(window_size))
+        current = getattr(self.narrative_context, "window_size", None)
+        if current == normalized:
+            return
+
+        payload = self._dump_narrative_context()
+        if payload:
+            payload["window_size"] = normalized
+            self._restore_narrative_context(payload)
+            return
+
+        self.narrative_context = self._create_narrative_context(window_size=normalized)
+
+    def _create_npc_director(self):
+        """Create NPCDirector with a safe fallback to None."""
+        if NPCDirector is None:
+            return None
+        try:
+            return NPCDirector()
+        except Exception as e:
+            logger.warning(f"初始化NPCDirector失败，将回退旧逻辑: {e}")
+            return None
     
     # ============================================================
     # 辅助方法
@@ -918,6 +960,106 @@ class GameEngine:
         if npc_action_plan:
             context["npc_action_plan"] = npc_action_plan
         return context
+
+    def _plan_npc_actions(
+        self,
+        trigger: str,
+        dm_output: Optional[DMAgentOutput] = None,
+        candidate_npc_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Use NPCDirector as a unified planning入口，返回{npc_id: plan_dict}。"""
+        if not self.npc_director or not hasattr(self.npc_director, "decide_actions"):
+            return {}
+
+        npc_ids = candidate_npc_ids or []
+        if not npc_ids:
+            npc_ids = [
+                char_id
+                for char_id, char in self.game_state.characters.items()
+                if not char.is_player and self._can_actor_act(char)
+            ]
+
+        if not npc_ids:
+            return {}
+
+        recent_events = []
+        if hasattr(self.narrative_context, "recent_events"):
+            for event in getattr(self.narrative_context, "recent_events", []):
+                if hasattr(event, "model_dump"):
+                    recent_events.append(event.model_dump())
+                elif isinstance(event, dict):
+                    recent_events.append(event)
+
+        decision = self.npc_director.decide_actions(
+            npc_ids=npc_ids,
+            game_state=self.game_state,
+            player_intent=dm_output,
+            trigger_source=trigger,
+            recent_events=recent_events,
+        )
+
+        plans: Dict[str, Any] = {}
+        raw_actions = getattr(decision, "actions", {}) if decision else {}
+        for npc_id, action in raw_actions.items():
+            if hasattr(action, "model_dump"):
+                plans[npc_id] = action.model_dump()
+            elif isinstance(action, dict):
+                plans[npc_id] = action
+        return plans
+
+    def _plan_single_npc_action(
+        self,
+        trigger: str,
+        dm_output: Optional[DMAgentOutput],
+    ) -> Optional[Dict[str, Any]]:
+        """Plan single NPC action with director, falling back to DM fields."""
+        preferred_npc_id = dm_output.npc_actor_id if dm_output else None
+        candidate_ids: List[str] = []
+        if preferred_npc_id:
+            candidate_ids.append(preferred_npc_id)
+        else:
+            default_npc_id = self._pick_default_npc_actor()
+            if default_npc_id:
+                candidate_ids.append(default_npc_id)
+
+        plans = self._plan_npc_actions(
+            trigger=trigger,
+            dm_output=dm_output,
+            candidate_npc_ids=candidate_ids,
+        )
+
+        if preferred_npc_id and preferred_npc_id in plans:
+            return plans[preferred_npc_id]
+        if plans:
+            first_npc_id = next(iter(plans.keys()))
+            return plans[first_npc_id]
+        return None
+
+    def _extract_npc_action_plan(self, dm_output: DMAgentOutput) -> Optional[Dict[str, Any]]:
+        """Get structured NPC action plan from NPCDirector, with DM fallback."""
+        plan = self._plan_single_npc_action(trigger="reactive", dm_output=dm_output)
+        if plan:
+            return plan
+
+        if dm_output.npc_actor_id or dm_output.npc_intent:
+            return {
+                "npc_id": dm_output.npc_actor_id,
+                "intent_description": dm_output.npc_intent or "",
+                "trigger_source": "reactive",
+            }
+        return None
+
+    def _extract_npc_actor_from_plan(self, action_plan: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Extract npc actor id from structured plan payload."""
+        if not action_plan:
+            return None
+
+        if isinstance(action_plan, dict):
+            for key in ("npc_id", "actor_id", "character_id"):
+                value = action_plan.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
 
     def _describe_npc_mode_policy(self) -> str:
         """返回当前NPC响应模式的策略说明，供Agent动态拼接上下文。"""
@@ -1038,6 +1180,8 @@ class GameEngine:
         text: str,
         source: str,
     ) -> None:
+        if not self.narrative_context or NarrativeEvent is None:
+            return
         self.narrative_context.add_event(
             NarrativeEvent(
                 turn=self.game_state.turn_count,
@@ -1071,13 +1215,31 @@ class GameEngine:
             return
 
         if isinstance(payload, dict):
-            ctx = self._create_narrative_context(window_size=int(payload.get("window_size", 5) or 5))
-            for event_data in payload.get("recent_events", []):
-                try:
-                    ctx.add_event(NarrativeEvent(**event_data))
-                except Exception:
-                    continue
-            self.narrative_context = ctx
+            if NarrativeContextSnapshot is None or NarrativeContext is None or NarrativeEvent is None:
+                self.narrative_context = self._create_narrative_context(
+                    window_size=int(payload.get("window_size", 5) or 5)
+                )
+                return
+
+            summary_lines = payload.get("summary_lines")
+            if not isinstance(summary_lines, list):
+                summary_text = str(payload.get("summary", "") or "")
+                summary_lines = [line.strip() for line in summary_text.splitlines() if line.strip()]
+
+            snapshot_data = {
+                "window_size": int(payload.get("window_size", 5) or 5),
+                "recent_events": payload.get("recent_events", []),
+                "summary_lines": summary_lines,
+                "key_facts": payload.get("key_facts", []),
+            }
+
+            try:
+                snapshot = NarrativeContextSnapshot(**snapshot_data)
+                self.narrative_context = NarrativeContext.from_snapshot(snapshot)
+            except Exception:
+                self.narrative_context = self._create_narrative_context(
+                    window_size=snapshot_data["window_size"]
+                )
             return
 
         self.narrative_context = self._create_narrative_context()

@@ -6,7 +6,26 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import unittest
 
 from src.data.npc_planning_models import NPCActionForm, NPCActionType
+from src.data.init.world_loader import load_initial_world_bundle
+from src.engine.game_engine import GameEngine
 from src.narrative import NarrativeContext, NarrativeContextSnapshot, NarrativeEvent
+
+
+class _FakeIO:
+    def save_character(self, _):
+        return 0
+
+    def save_item(self, _):
+        return 0
+
+    def save_map(self, _):
+        return 0
+
+    def clear_current_events(self):
+        return 0
+
+    def apply_state_change(self, _):
+        return 0
 
 
 class ArchitectureRefactorIncrementTests(unittest.TestCase):
@@ -57,6 +76,36 @@ class ArchitectureRefactorIncrementTests(unittest.TestCase):
         self.assertEqual(dumped["action_type"], "talk")
         self.assertIn("check", dumped)
         self.assertFalse(dumped["check"]["check_needed"])
+
+    def test_world_bundle_exposes_narrative_window(self):
+        bundle = load_initial_world_bundle(_FakeIO(), player_name="测试者", world_name="mysterious_library")
+        self.assertGreaterEqual(bundle.narrative_window, 1)
+
+    def test_engine_restore_narrative_context_keeps_summary_and_facts(self):
+        engine = GameEngine(io_system=_FakeIO())
+
+        payload = {
+            "window_size": 2,
+            "recent_events": [
+                {
+                    "turn": 3,
+                    "actor_id": "char-guard-01",
+                    "actor_name": "Guard",
+                    "text": "Guard reveals a clue about item-key-01",
+                    "source": "npc_queue",
+                    "key_facts": ["item-key-01"],
+                }
+            ],
+            "summary_lines": ["[Turn 1] player: Moved to map-room-secret-01"],
+            "key_facts": ["map-room-secret-01"],
+        }
+        engine._restore_narrative_context(payload)
+
+        exported = engine._dump_narrative_context()
+        self.assertEqual(exported.get("window_size"), 2)
+        self.assertIn("map-room-secret-01", exported.get("key_facts", []))
+        self.assertIn("item-key-01", exported.get("key_facts", []))
+        self.assertTrue(exported.get("summary_lines"))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
     "char-player-01",
     "char-guard-01"
   ],
+  "narrative_window": 5,
   "npc_response_mode": "reactive",
   "end_condition": "在地下密室找到关键真相并成功离开时或玩家直接选择逃跑逃离这个地方时结束游戏。",
   "entry_scene_narrative": "深夜，你踏入了神秘图书馆，潮湿的纸张气味与不安同时袭来。"

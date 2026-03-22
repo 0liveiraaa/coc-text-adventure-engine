@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List, Set
 
 from pydantic import BaseModel, Field
@@ -30,9 +31,15 @@ class NarrativeContextSnapshot(BaseModel):
 class NarrativeContext:
     """Lightweight rolling narrative context for prompt assembly."""
 
-    def __init__(self, window_size: int = 5, max_summary_lines: int = 100):
+    def __init__(
+        self,
+        window_size: int = 5,
+        max_summary_lines: int = 100,
+        max_context_chars: int = 4000,
+    ):
         self.window_size = max(1, window_size)
         self.max_summary_lines = max(1, max_summary_lines)
+        self.max_context_chars = max(1, max_context_chars)
         self.recent_events: List[NarrativeEvent] = []
         self.summary_lines: List[str] = []
         self.summary: str = ""
@@ -68,7 +75,7 @@ class NarrativeContext:
         if self.key_facts:
             sections.append("Key facts:\n" + ", ".join(sorted(self.key_facts)))
 
-        return "\n\n".join(sections)
+        return self._truncate_context("\n\n".join(sections))
 
     def to_snapshot(self) -> NarrativeContextSnapshot:
         """Build a typed snapshot for persistence boundaries."""
@@ -83,9 +90,13 @@ class NarrativeContext:
     def from_snapshot(cls, snapshot: NarrativeContextSnapshot) -> "NarrativeContext":
         """Rebuild context from a typed snapshot."""
         ctx = cls(window_size=snapshot.window_size)
-        ctx.recent_events = snapshot.recent_events.copy()
-        ctx.summary_lines = snapshot.summary_lines.copy()
+        ctx.summary_lines = [line.strip() for line in snapshot.summary_lines if str(line).strip()]
         ctx.key_facts = set(snapshot.key_facts)
+
+        # Re-append recent events to enforce rolling window constraints.
+        for event in snapshot.recent_events:
+            ctx.add_event(event)
+
         ctx._refresh_summary_text()
         return ctx
 
@@ -139,5 +150,20 @@ class NarrativeContext:
             if keyword in lowered or keyword in text:
                 facts.add(keyword)
 
+        # Extract compact structured clues from free text when possible.
+        for pattern in (
+            r"\b(?:hp|san|luck|lucky)\b\s*[:=+-]?\s*\d+",
+            r"\b(?:item|char|map)-[a-z0-9-]+\b",
+        ):
+            for match in re.findall(pattern, lowered):
+                facts.add(match.strip())
+
         return facts
+
+    def _truncate_context(self, context_text: str) -> str:
+        if len(context_text) <= self.max_context_chars:
+            return context_text
+
+        # Keep the most recent and actionable information when trimming.
+        return context_text[-self.max_context_chars :].lstrip()
 

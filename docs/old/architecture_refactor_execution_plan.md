@@ -259,3 +259,105 @@
 
 **Phase 1 结论**：已完成，可进入 Phase 2（NPCDirector 抽取）。
 
+---
+
+## 附录：Phase 2 完成情况（2026-03-22）
+
+### 交付物清单
+
+| 交付物 | 文件路径 | 状态 |
+|--------|----------|------|
+| NPCDirector 模块 | [`src/npc/npc_director.py`](../../src/npc/npc_director.py:1) | ✅ 已完成 |
+| NPC 包初始化 | [`src/npc/__init__.py`](../../src/npc/__init__.py:1) | ✅ 已完成 |
+| 引擎接入 | [`src/engine/game_engine.py`](../../src/engine/game_engine.py:90) | ✅ 已完成 |
+| 集成测试 | [`tests/test_npc_director.py`](../../tests/test_npc_director.py:1) | ✅ 已完成 |
+
+### 核心实现内容
+
+**1. NPCDirector 独立模块**（Phase 2 核心目标）
+- `decide_actions()`：统一决策入口，输入 `npc_ids` + `game_state` + `player_intent`，输出 `NPCActionDecision`
+- 规则型默认规划器：根据 `npc_response_needed` 生成 TALK 或 WAIT 动作
+- 支持 `trigger_source` 标记（queue/reactive）
+- 向后兼容：保留 `npc_intent` 兜底
+
+**2. GameEngine 集成**
+- `_create_npc_director()`：安全初始化，异常回退到 `None`
+- `_plan_npc_actions()`：批量 NPC 计划，供 queue 模式调用
+- `_plan_single_npc_action()`：单个 NPC 计划，供 reactive 模式调用
+- `_extract_npc_action_plan()`：提取结构化计划，DM 字段兜底
+- `_extract_npc_actor_from_plan()`：从计划解析 npc_id，支持多键名
+- `_pick_default_npc_actor()`：同场景兜底选 NPC
+
+**3. 双模式接入点**
+- **queue 模式**：`_plan_npc_actions()` 生成计划 → `_pending_npc_action_plans` 传递 → `_extract_npc_intent_from_plan()` 提取意图
+- **reactive 模式**：`_extract_npc_action_plan()` 调用 Director → `_extract_npc_actor_from_plan()` 解析 actor → 意图回填到 `evolve_npc_action()`
+
+**4. 缺失方法修复**
+- `_extract_npc_action_plan`：优先走 Director，失败回退到 DM 字段
+- `_extract_npc_actor_from_plan`：支持多键名（npc_id/actor_id/character_id）
+
+### 测试覆盖
+
+[`tests/test_npc_director.py`](../../tests/test_npc_director.py:1) 包含 2 个集成测试：
+1. `test_queue_mode_plans_action_through_director`：验证 queue 模式下 Director 生成计划
+2. `test_reactive_mode_uses_structured_plan_intent`：验证 reactive 模式下结构化意图传入 `StateEvolution`
+
+### 向后兼容
+
+- `DMAgentOutput` 原有字段完全保留
+- `npc_intent` 继续作为兜底字段存在
+- NPCDirector 导入失败时自动回退旧逻辑
+- 旧世界配置无需修改即可运行
+
+### 验证结果
+
+| 验证项 | 状态 | 备注 |
+|--------|------|------|
+| 语法检查 | ✅ | `py_compile` 全部通过 |
+| 新增测试 | ✅ | `test_npc_director` 2/2 通过 |
+| 回归测试 | ⚠️ | 1 个既有失败（世界配置默认值与测试期望不符）|
+| 静态检查 | ✅ | 无报错 |
+
+**Phase 2 结论**：已完成，NPC 行为通过统一入口产生，玩家回合和 NPC 回合边界清晰。可进入 Phase 3（NarrativeContext 深化与流程统一）。
+
+---
+
+## 附录：Phase 3 完成情况（2026-03-22）
+
+### 交付物清单
+
+| 交付物 | 文件路径 | 状态 |
+|--------|----------|------|
+| NarrativeContext 强化实现 | [`src/narrative/narrative_context.py`](../../src/narrative/narrative_context.py:1) | ✅ 已完成 |
+| 引擎叙事恢复与窗口重配 | [`src/engine/game_engine.py`](../../src/engine/game_engine.py:1) | ✅ 已完成 |
+| 世界配置叙事窗口字段 | [`src/data/init/world_loader.py`](../../src/data/init/world_loader.py:1) | ✅ 已完成 |
+| 示例世界窗口配置 | [`config/world/mysterious_library/world.json`](../../config/world/mysterious_library/world.json:1) | ✅ 已完成 |
+| Phase 3 测试补充 | [`tests/test_narrative_context.py`](../../tests/test_narrative_context.py:1) | ✅ 已完成 |
+| 增量回归测试补充 | [`tests/test_architecture_refactor_increment.py`](../../tests/test_architecture_refactor_increment.py:1) | ✅ 已完成 |
+
+### 核心实现内容
+
+**1. 叙事窗口压缩深化**
+- `NarrativeContext` 增加 `max_context_chars`，输出给 LLM 的上下文长度可控。
+- 保留 `window_size` + `max_summary_lines` 双层约束，避免长回合上下文无限增长。
+- 关键事实提取增加结构化匹配（属性数值变化、实体 ID 线索）。
+
+**2. 快照恢复链路补全**
+- `GameEngine._restore_narrative_context()` 改为优先按 `NarrativeContextSnapshot` 反序列化。
+- 恢复时保留 `summary_lines`、`key_facts`，不再丢失压缩历史关键信息。
+- 兼容旧存档：当仅有 `summary` 时自动降级拆分为 `summary_lines`。
+
+**3. 世界配置接入叙事窗口**
+- `WorldBundle` 新增 `narrative_window` 字段。
+- `world.json` 可配置 `narrative_window`，在 `GameEngine.apply_world_settings()` 中生效。
+- 新增 `_set_narrative_window()`：运行中可重设窗口并保留既有叙事上下文。
+
+### 验收状态
+
+| 验收标准 | 状态 | 备注 |
+|----------|------|------|
+| 连续多回合运行时，上下文不会无限增长 | ✅ | 窗口、摘要行数、LLM上下文长度三重限制 |
+| 关键事实不会因压缩而丢失 | ✅ | 压缩写入 `key_facts`，恢复链路保留 `summary_lines/key_facts` |
+
+**Phase 3 结论**：已完成，可进入 Phase 4（流程统一与兼容层收敛）。
+

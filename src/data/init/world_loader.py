@@ -26,6 +26,7 @@ class WorldBundle:
     world_name: str
     end_condition: str
     npc_response_mode: str = "queue"
+    narrative_window: int = 5
 
 
 class WorldLoader:
@@ -91,6 +92,7 @@ class WorldLoader:
             world_name=self.world_name,
             end_condition=self.manifest.get("end_condition", "玩家死亡或达成剧情结局"), #修改建议:这里出现不必要的硬编码了吗?注意核查
             npc_response_mode=self._resolve_npc_response_mode(),
+            narrative_window=self._resolve_narrative_window(),
         )
 
     def load_world_from_config(
@@ -387,6 +389,15 @@ class WorldLoader:
         if configured in {"queue", "reactive"}:
             return configured
         return "queue"
+
+    def _resolve_narrative_window(self) -> int:
+        configured = self.manifest.get("narrative_window", 5)
+        try:
+            value = int(configured)
+        except (TypeError, ValueError):
+            return 5
+
+        return max(1, value)
     
     def get_character(self, char_id: str) -> Optional[Character]:
         """获取指定角色"""

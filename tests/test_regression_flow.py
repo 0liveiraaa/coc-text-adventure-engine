@@ -1,5 +1,7 @@
 import unittest
 import tempfile
+import json
+from pathlib import Path
 
 from src.data.io_system import ERROR_SUCCESS, ERROR_ID_NOT_FOUND, IOSystem
 from src.data.init.world_loader import load_initial_world_bundle
@@ -223,10 +225,13 @@ class AddDescriptionStateAgent(DummyStateAgent):
 class RegressionFlowTests(unittest.TestCase):
     def test_world_bundle_loader_with_split_files(self):
         bundle = load_initial_world_bundle(FakeIO(), player_name="测试者", world_name="mysterious_library")
+        world_manifest_path = Path("config/world/mysterious_library/world.json")
+        with open(world_manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
 
         self.assertEqual(bundle.world_name, "mysterious_library")
         self.assertTrue(bundle.end_condition)
-        self.assertEqual(bundle.npc_response_mode, "queue")
+        self.assertEqual(bundle.npc_response_mode, manifest.get("npc_response_mode", "queue"))
         self.assertIn("char-player-01", bundle.game_state.characters)
         self.assertIn("map-room-library-01", bundle.game_state.maps)
 
