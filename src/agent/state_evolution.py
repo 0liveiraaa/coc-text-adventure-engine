@@ -206,8 +206,8 @@ class StateEvolution:
         Args:
             npc_id: NPC角色ID
             game_state: 当前游戏状态
-            check_result: NPC鉴定结果（可选）
-            npc_intent: NPC意图描述（可选）
+            check_result: NPC鉴定结果（可选） #修改建议:核查一下这一部分有相关的输入吗?
+            npc_intent: NPC意图描述（可选）  #修改建议:核查一下这一部分有相关的输入吗?
             additional_context: 额外上下文信息
         
         Returns:

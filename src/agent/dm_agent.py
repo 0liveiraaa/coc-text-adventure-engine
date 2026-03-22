@@ -85,7 +85,7 @@ DMAGENT_OUTPUT_SCHEMA = {
         },
         "npc_response_needed": {
             "type": "boolean",
-            "description": "是否需要NPC在本轮对玩家行动做出响应"
+            "description": "是否需要NPC在本轮对玩家行动做出响应" 
         },
         "npc_actor_id": {
             "type": ["string", "null"],

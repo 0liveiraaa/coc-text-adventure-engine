@@ -56,7 +56,7 @@ class WorldLoader:
     def load_world_bundle(
         self,
         player_name: Optional[str] = None,
-        world_name: str = "mysterious_library"
+        world_name: str = "mysterious_library"  
     ) -> WorldBundle:
         """从配置加载完整世界，并返回带元信息的结果。"""
         self._reset()
@@ -89,7 +89,7 @@ class WorldLoader:
         return WorldBundle(
             game_state=game_state,
             world_name=self.world_name,
-            end_condition=self.manifest.get("end_condition", "玩家死亡或达成剧情结局"),
+            end_condition=self.manifest.get("end_condition", "玩家死亡或达成剧情结局"), #修改建议:这里出现不必要的硬编码了吗?注意核查
             npc_response_mode=self._resolve_npc_response_mode(),
         )
 
@@ -440,7 +440,7 @@ def load_initial_world(
 def load_initial_world_bundle(
     io_system: IOSystem,
     player_name: Optional[str] = None,
-    world_name: str = "mysterious_library"
+    world_name: str = "mysterious_library"   
 ) -> WorldBundle:
     """便捷函数：加载世界及其元配置（结局条件等）。"""
     loader = WorldLoader(io_system)

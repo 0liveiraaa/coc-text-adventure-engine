@@ -26,6 +26,11 @@ from src.agent.input_system import InputSystem, InputResult, InputType
 from src.agent.dm_agent import DMAgent
 from src.agent.state_evolution import StateEvolution as StateEvolutionAgent
 from src.data.init.world_loader import load_initial_world_bundle
+try:
+    from src.narrative import NarrativeContext, NarrativeEvent
+except Exception:  # pragma: no cover - optional module
+    NarrativeContext = None
+    NarrativeEvent = None
 from src.rule.rule_system import RuleSystem
 
 # 配置日志
@@ -52,6 +57,7 @@ class GameEngine:
         state_agent: Optional[StateEvolutionAgent] = None,
         db_path: str = "data/game.db",
         npc_response_mode: str = "queue",
+        narrative_window: int = 5,
     ):
         """
         初始化游戏引擎
@@ -76,7 +82,9 @@ class GameEngine:
         self._current_narrative = ""  # 当前回合叙事
         self._ending_text = ""  # 结局文本
         self._is_game_over = False
+        self.narrative_context = self._create_narrative_context(window_size=narrative_window)
         self.dm_dialogue_log: List[Dict[str, str]] = []  # DM与玩家对话记录
+        self._pending_npc_action_plans: Dict[str, Any] = {}
         
         # 回合管理
         self._action_queue: List[str] = []  # 可行动角色队列
@@ -85,7 +93,7 @@ class GameEngine:
         self.set_npc_response_mode(npc_response_mode)
         
         # 世界配置（可被外部加载器覆盖）
-        self.world_name = "default"
+        self.world_name = "default"#修改建议:检查一下各个默认值是否统一
         self.end_condition = "玩家死亡或达成剧情结局"
         self._ending_rules: List[Dict[str, Any]] = []
         
@@ -95,7 +103,7 @@ class GameEngine:
     # 游戏生命周期管理
     # ============================================================
     
-    def new_game(
+    def new_game( #修改建议:检查一下这个函数用到没有,main.py里有一个start_new_game 这儿又有一个,思考一下需不需要统一接口
         self,
         world_name: str = "mysterious_library"
     ) -> bool:
@@ -116,6 +124,10 @@ class GameEngine:
             self._is_game_over = False
             self._ending_text = ""
             self._current_narrative = ""
+            self.narrative_context = self._create_narrative_context(
+                window_size=getattr(self.narrative_context, "window_size", 5) if self.narrative_context else 5
+            )
+            self._pending_npc_action_plans = {}
             
             bundle = load_initial_world_bundle(
                 self.io,
@@ -165,6 +177,7 @@ class GameEngine:
             with open(save_path, "r", encoding="utf-8") as f:
                 save_data = json.load(f)
             self.dm_dialogue_log = save_data.pop("dm_dialogue_log", [])
+            self._restore_narrative_context(save_data.pop("narrative_context", None))
             
             # 恢复游戏状态
             self.game_state = GameState(**save_data)
@@ -199,6 +212,9 @@ class GameEngine:
             # 序列化游戏状态
             save_data = self.game_state.model_dump()
             save_data["dm_dialogue_log"] = self.dm_dialogue_log
+            narrative_state = self._dump_narrative_context()
+            if narrative_state:
+                save_data["narrative_context"] = narrative_state
             
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -306,7 +322,7 @@ class GameEngine:
                         return result
 
                     if cmd_result.direct_response == "DEBUG_MODE_OFF":
-                        logging.getLogger().setLevel(logging.INFO)
+                        logging.getLogger().setLevel(logging.INFO)  #修改建议:没有提供关闭调试指令的'\'指令
                         result["response"] = "调试模式已关闭"
                         return result
                     
@@ -364,6 +380,12 @@ class GameEngine:
                 result["narrative"] = f"{npc_prelude_text}\n{result['narrative']}"
             self._current_narrative = evolution_result.narrative
             self._record_dm_dialogue(natural_input, evolution_result.narrative)
+            self._append_narrative_event(
+                actor_id=self.game_state.player_id or "",
+                actor_name=self.game_state.get_player().name if self.game_state.get_player() else "",
+                text=evolution_result.narrative,
+                source="player_action",
+            )
             
             # ===== Step 6: 应用状态变更 =====
             if evolution_result.changes:
@@ -476,12 +498,17 @@ class GameEngine:
                 continue
 
             npc_check = self._execute_npc_check(actor)
+            planned_action = self._pending_npc_action_plans.pop(actor.id, None)
 
             npc_output = self.state_agent.evolve_npc_action(
                 npc_id=actor.id,
                 game_state=self.game_state,
                 check_result=npc_check,
-                additional_context=self._build_npc_runtime_context(trigger="queue")
+                npc_intent=self._extract_npc_intent_from_plan(planned_action),
+                additional_context=self._build_npc_runtime_context(
+                    trigger="queue",
+                    npc_action_plan=planned_action,
+                ),
             )
 
             if npc_output.changes:
@@ -489,6 +516,12 @@ class GameEngine:
 
             if npc_output.narrative:
                 narratives.append(f"[{actor.name}] {npc_output.narrative}")
+                self._append_narrative_event(
+                    actor_id=actor.id,
+                    actor_name=actor.name,
+                    text=npc_output.narrative,
+                    source="npc_queue",
+                )
 
             if npc_output.is_end:
                 self._is_game_over = True
@@ -555,7 +588,12 @@ class GameEngine:
         if not dm_output.npc_response_needed:
             return {"game_over": False, "narrative": ""}
 
-        npc_id = dm_output.npc_actor_id or self._pick_default_npc_actor()
+        action_plan = self._extract_npc_action_plan(dm_output)
+        npc_id = (
+            self._extract_npc_actor_from_plan(action_plan)
+            or dm_output.npc_actor_id
+            or self._pick_default_npc_actor()
+        )
         if not npc_id:
             logger.debug("响应模式已开启，但未找到可响应NPC")
             return {"game_over": False, "narrative": ""}
@@ -569,16 +607,25 @@ class GameEngine:
             npc_id=npc.id,
             game_state=self.game_state,
             check_result=npc_check,
-            npc_intent=dm_output.npc_intent,
+            npc_intent=dm_output.npc_intent or self._extract_npc_intent_from_plan(action_plan),
             additional_context=self._build_npc_runtime_context(
                 trigger="reactive",
                 player_check=player_check,
                 player_action_description=dm_output.action_description,
+                npc_action_plan=action_plan,
             ),
         )
 
         if npc_output.changes:
             self._apply_changes(npc_output.changes)
+
+        if npc_output.narrative:
+            self._append_narrative_event(
+                actor_id=npc.id,
+                actor_name=npc.name,
+                text=npc_output.narrative,
+                source="npc_reactive",
+            )
 
         return {
             "game_over": npc_output.is_end,
@@ -818,6 +865,12 @@ class GameEngine:
             "player_input": player_input,
             "dm_response": dm_response,
         })
+
+    def _create_narrative_context(self, window_size: int = 5):
+        """Create a narrative context instance, with a no-op fallback."""
+        if NarrativeContext is None:
+            return _NullNarrativeContext()
+        return NarrativeContext(window_size=window_size)
     
     # ============================================================
     # 辅助方法
@@ -835,6 +888,7 @@ class GameEngine:
             "engine_context": self._build_game_context(),
             "action_queue": self._action_queue,
             "current_actor_id": self._current_actor_id,
+            "narrative_context": self._get_narrative_context_for_llm(),
         }
         if npc_prelude_text:
             context["npc_prelude"] = npc_prelude_text
@@ -845,6 +899,7 @@ class GameEngine:
         trigger: str,
         player_check: Optional[CheckOutput] = None,
         player_action_description: str = "",
+        npc_action_plan: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """构建NPC推演用的动态上下文，支持queue/reactive双模式。"""
         context: Dict[str, Any] = {
@@ -854,11 +909,14 @@ class GameEngine:
             "npc_response_policy": self._describe_npc_mode_policy(),
             "action_queue": self._action_queue,
             "current_actor_id": self._current_actor_id,
+            "narrative_context": self._get_narrative_context_for_llm(),
         }
         if player_check:
             context["player_check_result"] = player_check.model_dump()
         if player_action_description:
             context["player_action_description"] = player_action_description
+        if npc_action_plan:
+            context["npc_action_plan"] = npc_action_plan
         return context
 
     def _describe_npc_mode_policy(self) -> str:
@@ -970,7 +1028,59 @@ class GameEngine:
                 "san": player.status.san,
                 "lucky": player.status.lucky,
             } if player else None,
+            "narrative_context": self._dump_narrative_context(),
         }
+
+    def _append_narrative_event(
+        self,
+        actor_id: str,
+        actor_name: str,
+        text: str,
+        source: str,
+    ) -> None:
+        self.narrative_context.add_event(
+            NarrativeEvent(
+                turn=self.game_state.turn_count,
+                actor_id=actor_id,
+                actor_name=actor_name,
+                text=text,
+                source=source,
+            )
+        )
+
+    def _get_narrative_context_for_llm(self) -> str:
+        """Return a compact narrative context block for prompt assembly."""
+        if not self.narrative_context:
+            return ""
+        if hasattr(self.narrative_context, "get_context_for_llm"):
+            return self.narrative_context.get_context_for_llm()
+        return ""
+
+    def _dump_narrative_context(self) -> Dict[str, Any]:
+        """Serialize narrative context for save files."""
+        if not self.narrative_context:
+            return {}
+        if hasattr(self.narrative_context, "export_state"):
+            return self.narrative_context.export_state()
+        return {}
+
+    def _restore_narrative_context(self, payload: Any) -> None:
+        """Restore narrative context from a saved snapshot or dict."""
+        if not payload:
+            self.narrative_context = self._create_narrative_context()
+            return
+
+        if isinstance(payload, dict):
+            ctx = self._create_narrative_context(window_size=int(payload.get("window_size", 5) or 5))
+            for event_data in payload.get("recent_events", []):
+                try:
+                    ctx.add_event(NarrativeEvent(**event_data))
+                except Exception:
+                    continue
+            self.narrative_context = ctx
+            return
+
+        self.narrative_context = self._create_narrative_context()
 
     def _load_ending_rules(self):
         """加载世界配置中的结局规则。"""
@@ -1084,6 +1194,43 @@ class GameEngine:
     def get_current_narrative(self) -> str:
         """获取当前叙事"""
         return self._current_narrative
+
+    def _extract_npc_intent_from_plan(self, action_plan: Any) -> str:
+        """Extract intent description from NPC action plan."""
+        if not action_plan:
+            return ""
+        if isinstance(action_plan, dict):
+            return action_plan.get("intent_description", "")
+        if hasattr(action_plan, "intent_description"):
+            return str(action_plan.intent_description)
+        return ""
+
+
+# ============================================================
+# Null Narrative Context Fallback
+# ============================================================
+
+class _NullNarrativeContext:
+    """Fallback when NarrativeContext is not available."""
+
+    def __init__(self, window_size: int = 5):
+        self.window_size = window_size
+        self.recent_events: List[Any] = []
+        self.summary_lines: List[str] = []
+        self.key_facts: set = set()
+        self.summary: str = ""
+
+    def add_event(self, event: Any) -> None:
+        """No-op event addition."""
+        pass
+
+    def get_context_for_llm(self) -> str:
+        """Return empty context for LLM prompts."""
+        return ""
+
+    def export_state(self) -> Dict[str, Any]:
+        """Return empty state for serialization."""
+        return {}
 
 
 # ============================================================
