@@ -8,9 +8,11 @@ from src.narrative.narrative_context import (
     NarrativeContextSnapshot,
     NarrativeEvent,
 )
+from src.narrative.narrative_merger import NarrativeMerger
 
 __all__ = [
     "NarrativeContext",
     "NarrativeContextSnapshot",
     "NarrativeEvent",
+    "NarrativeMerger",
 ]

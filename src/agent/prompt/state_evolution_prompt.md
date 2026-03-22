@@ -160,10 +160,7 @@
 - **与玩家的关系**：友好、敌对、中立、怀疑
 - **环境约束**：当前场景的限制
 - **游戏体验优先**：NPC行动应增强玩家体验，并保持叙事可理解性    
-#修改建议:单独独立npc扮演系统,使用独立提示词和代码,与state_agent解耦,让其输出格式化输出,json文本走->rule_system->state_evolution_system(如果需要鉴定),如果不需要就直接输出out_put ,故在
-队列模式下: 玩家输入->dm_agent->rule_system->state_agent->out_put
-队列循环直到抽取到玩家,对于每个被抽出的npc->检查是否需要鉴定->不需要鉴定/(需要鉴定->重复玩家路径(不需要dm_agent))->out_put
-响应模式:玩家输入->dm_agent->rule_system->state_agent->(如果需要响应->npc_agent->rule_agent->state_agent->out_put)
+
 
 ## 结局判定
 
@@ -195,6 +192,16 @@
 7. **ID约束**：changes中所有id和value里引用的实体ID必须来自当前上下文中已存在的实体
 8. **位置约束**：角色location只能更新到已存在的地图ID
 9. **简表单优先**：优先输出最小必要字段（id/field/operation/value），不要发明额外字段
+10. **检定锚点优先**：若上下文提供player_resolution_anchor/check_result，叙事与changes不得改写该锚点结论
+
+## 一致性锚点规则（强约束）
+
+当输入包含 `player_resolution_anchor` 时，必须遵守：
+
+1. 若 `action_succeeded=true`：玩家本行动在事实层面成功，不得叙述成“玩家行动整体失败”。
+2. 若 `action_succeeded=false`：玩家本行动在事实层面失败，不得叙述成“玩家行动整体成功达成”。
+3. NPC可在后续阶段做出反应并改变局势，但不能回写或篡改玩家该次检定的胜负事实。
+4. 若多个片段冲突，以检定锚点为最终事实来源。
 
 ## 示例
 

@@ -422,6 +422,7 @@ class StateEvolution:
         policy = str(game_context.get("npc_response_policy", "") or "")
         npc_response_expected = bool(game_context.get("npc_response_expected", False))
         npc_actor_id = str(game_context.get("npc_response_actor_id", "") or "")
+        player_resolution_anchor = game_context.get("player_resolution_anchor")
 
         runtime_lines = [
             "## 玩家推演运行时上下文",
@@ -432,6 +433,11 @@ class StateEvolution:
             runtime_lines.append(f"- npc_response_actor_id: {npc_actor_id}")
         if policy:
             runtime_lines.append(f"- policy: {policy}")
+        if player_resolution_anchor:
+            runtime_lines.append(
+                "- player_resolution_anchor:\n"
+                + json.dumps(player_resolution_anchor, ensure_ascii=False, indent=2)
+            )
         runtime_text = "\n".join(runtime_lines)
         
         prompt = f"""{self.system_prompt}
@@ -490,6 +496,7 @@ class StateEvolution:
         policy = str(game_context.get("npc_response_policy", "") or "")
         player_action = str(game_context.get("player_action_description", "") or "")
         player_check = game_context.get("player_check_result")
+        player_resolution_anchor = game_context.get("player_resolution_anchor")
 
         runtime_lines = [
             "## NPC响应运行时上下文",
@@ -502,6 +509,11 @@ class StateEvolution:
             runtime_lines.append(f"- 本轮玩家行动: {player_action}")
         if player_check:
             runtime_lines.append("- 本轮玩家检定:\n" + json.dumps(player_check, ensure_ascii=False, indent=2))
+        if player_resolution_anchor:
+            runtime_lines.append(
+                "- player_resolution_anchor:\n"
+                + json.dumps(player_resolution_anchor, ensure_ascii=False, indent=2)
+            )
         runtime_text = "\n".join(runtime_lines)
         
         prompt = f"""{self.system_prompt}

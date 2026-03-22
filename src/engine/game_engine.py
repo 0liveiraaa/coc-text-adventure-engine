@@ -12,7 +12,7 @@ Game Engine核心模块 - 游戏引擎主类
 import logging
 import json
 import re
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Iterable
 from pathlib import Path
 
 from src.data.io_system import IOSystem
@@ -27,15 +27,19 @@ from src.agent.dm_agent import DMAgent
 from src.agent.state_evolution import StateEvolution as StateEvolutionAgent
 from src.data.init.world_loader import load_initial_world_bundle
 try:
-    from src.narrative import NarrativeContext, NarrativeContextSnapshot, NarrativeEvent
+    from src.narrative import NarrativeContext, NarrativeContextSnapshot, NarrativeEvent, NarrativeMerger
 except Exception:  # pragma: no cover - optional module
     NarrativeContext = None
     NarrativeContextSnapshot = None
     NarrativeEvent = None
+    NarrativeMerger = None
 try:
-    from src.npc import NPCDirector
+    from src.agent.npc import NPCDirector
 except Exception:  # pragma: no cover - optional module
-    NPCDirector = None
+    try:
+        from src.npc import NPCDirector
+    except Exception:  # pragma: no cover - optional module
+        NPCDirector = None
 from src.rule.rule_system import RuleSystem
 
 # 配置日志
@@ -61,7 +65,7 @@ class GameEngine:
         rule_system: Optional[RuleSystem] = None,
         state_agent: Optional[StateEvolutionAgent] = None,
         db_path: str = "data/game.db",
-        npc_response_mode: str = "queue",
+        npc_response_mode: str = "unified",
         narrative_window: int = 5,
     ):
         """
@@ -87,7 +91,10 @@ class GameEngine:
         self._current_narrative = ""  # 当前回合叙事
         self._ending_text = ""  # 结局文本
         self._is_game_over = False
+        self._npc_director_use_llm = True
+        self._narrative_merge_use_llm = True
         self.narrative_context = self._create_narrative_context(window_size=narrative_window)
+        self.narrative_merger = self._create_narrative_merger()
         self.npc_director = self._create_npc_director()
         self.dm_dialogue_log: List[Dict[str, str]] = []  # DM与玩家对话记录
         self._pending_npc_action_plans: Dict[str, Any] = {}
@@ -95,7 +102,7 @@ class GameEngine:
         # 回合管理
         self._action_queue: List[str] = []  # 可行动角色队列
         self._current_actor_id: Optional[str] = None  # 当前行动角色
-        self._npc_response_mode: str = "queue"
+        self._npc_response_mode: str = "unified"
         self.set_npc_response_mode(npc_response_mode)
         
         # 世界配置（可被外部加载器覆盖）
@@ -146,6 +153,8 @@ class GameEngine:
                 bundle.end_condition,
                 bundle.npc_response_mode,
                 bundle.narrative_window,
+                bundle.npc_director_use_llm,
+                bundle.narrative_merge_use_llm,
             )
             
             # 初始化回合
@@ -244,6 +253,8 @@ class GameEngine:
         end_condition: str,
         npc_response_mode: Optional[str] = None,
         narrative_window: Optional[int] = None,
+        npc_director_use_llm: Optional[bool] = None,
+        narrative_merge_use_llm: Optional[bool] = None,
     ):
         """应用世界级配置（例如来自world.json）。"""
         self.world_name = world_name
@@ -252,6 +263,12 @@ class GameEngine:
             self.set_npc_response_mode(npc_response_mode)
         if narrative_window is not None:
             self._set_narrative_window(narrative_window)
+        if npc_director_use_llm is not None:
+            self._npc_director_use_llm = bool(npc_director_use_llm)
+            self.npc_director = self._create_npc_director()
+        if narrative_merge_use_llm is not None:
+            self._narrative_merge_use_llm = bool(narrative_merge_use_llm)
+            self.narrative_merger = self._create_narrative_merger()
         # 让状态推演系统共享同一结局条件
         self.state_agent.end_condition = self.end_condition
         self._load_ending_rules()
@@ -346,29 +363,18 @@ class GameEngine:
                     result["response"] = input_result.direct_response or "未知指令"
                     return result
 
-            npc_prelude = {"game_over": False, "narrative": ""}
-            if self._npc_response_mode == "queue":
-                npc_prelude = self._process_npc_turns_until_player()
-            npc_prelude_text = (npc_prelude.get("narrative") or "").strip()
-            if npc_prelude.get("game_over"):
-                result["game_over"] = True
-                result["narrative"] = npc_prelude.get("narrative")
-                return result
-            
             # 自然语言输入，继续DM Agent处理
             natural_input = input_result.natural_input
             
             # ===== Step 3: DM Agent解析 =====
             dm_output = self._dm_agent_parse(
                 natural_input,
-                npc_prelude_text=npc_prelude_text,
+                npc_prelude_text="",
             )
             
             # 如果是纯对话，直接回复
             if dm_output.is_dialogue:
                 result["response"] = dm_output.response_to_player
-                if npc_prelude_text and result["response"]:
-                    result["response"] = f"{npc_prelude_text}\n{result['response']}"
                 self._record_dm_dialogue(natural_input, dm_output.response_to_player)
                 return result
             
@@ -380,52 +386,73 @@ class GameEngine:
                 result["check_result"] = check_output
             
             # ===== Step 5: 状态推演系统 =====
+            player_resolution_anchor = self._build_player_resolution_anchor(
+                dm_output=dm_output,
+                check_result=check_output,
+                evolution_result=None,
+            )
             evolution_result = self._state_evolution(
                 dm_output=dm_output,
-                check_result=check_output
+                check_result=check_output,
+                player_resolution_anchor=player_resolution_anchor,
             )
-            
-            result["narrative"] = evolution_result.narrative
-            if npc_prelude_text and result["narrative"]:
-                result["narrative"] = f"{npc_prelude_text}\n{result['narrative']}"
-            self._current_narrative = evolution_result.narrative
-            self._record_dm_dialogue(natural_input, evolution_result.narrative)
-            self._append_narrative_event(
-                actor_id=self.game_state.player_id or "",
-                actor_name=self.game_state.get_player().name if self.game_state.get_player() else "",
-                text=evolution_result.narrative,
-                source="player_action",
+            player_resolution_anchor = self._build_player_resolution_anchor(
+                dm_output=dm_output,
+                check_result=check_output,
+                evolution_result=evolution_result,
             )
+
+            fragments: List[Dict[str, str]] = []
+            if evolution_result.narrative:
+                player = self.game_state.get_player()
+                fragments.append(
+                    {
+                        "actor_id": self.game_state.player_id or "",
+                        "actor_name": player.name if player else "玩家",
+                        "text": evolution_result.narrative,
+                    }
+                )
             
             # ===== Step 6: 应用状态变更 =====
             if evolution_result.changes:
                 self._apply_changes(evolution_result.changes)
 
-            # 响应模式：由DM决定是否触发NPC在本轮追响应答。
-            if self._npc_response_mode == "reactive":
-                npc_follow = self._process_reactive_npc_response(
-                    dm_output=dm_output,
-                    player_check=check_output,
+            npc_follow = self._process_unified_npc_response(
+                dm_output=dm_output,
+                player_check=check_output,
+                player_resolution_anchor=player_resolution_anchor,
+            )
+            fragments.extend(npc_follow.get("fragments", []))
+
+            merged_narrative = self._merge_turn_narratives(
+                fragments,
+                truth_anchor=player_resolution_anchor,
+            )
+            result["narrative"] = merged_narrative
+            self._current_narrative = merged_narrative
+            self._record_dm_dialogue(natural_input, merged_narrative)
+
+            if merged_narrative:
+                self._append_narrative_event(
+                    actor_id=self.game_state.player_id or "",
+                    actor_name=self.game_state.get_player().name if self.game_state.get_player() else "",
+                    text=merged_narrative,
+                    source="turn_merged",
                 )
 
-                npc_text = (npc_follow.get("narrative") or "").strip()
-                if npc_text:
-                    if result["narrative"]:
-                        result["narrative"] = f"{result['narrative']}\n{npc_text}"
-                    else:
-                        result["narrative"] = npc_text
-
-                if npc_follow.get("game_over"):
-                    self._is_game_over = True
-                    result["game_over"] = True
-                    end_text = npc_follow.get("ending") or ""
-                    if end_text:
-                        result["narrative"] = f"{result['narrative']}\n\n{end_text}" if result["narrative"] else end_text
+            if npc_follow.get("game_over"):
+                self._is_game_over = True
+                result["game_over"] = True
+                end_text = npc_follow.get("ending") or ""
+                if end_text:
+                    result["narrative"] = f"{result['narrative']}\n\n{end_text}" if result["narrative"] else end_text
             
             # 更新玩家current_event
             player = self.game_state.get_player()
             if player:
-                player.memory.current_event = evolution_result.narrative
+                # Keep current_event aligned with the displayed narrative to avoid
+                # next-loop duplicate output showing a different (player-only) version.
+                player.memory.current_event = merged_narrative or evolution_result.narrative
             
             # 结局判定采用双轨：AI主判定，代码规则保底。
             if evolution_result.is_end:
@@ -709,7 +736,8 @@ class GameEngine:
     def _state_evolution(
         self,
         dm_output: DMAgentOutput,
-        check_result: Optional[CheckOutput]
+        check_result: Optional[CheckOutput],
+        player_resolution_anchor: Optional[Dict[str, Any]] = None,
     ) -> StateEvolutionOutput:
         """
         状态推演 - Step 5
@@ -728,10 +756,12 @@ class GameEngine:
             game_state=self.game_state,
             additional_context={
                 "engine_context": self._build_game_context(),
+                    "narrative_context": self._get_narrative_context_for_llm(),
+                    "player_resolution_anchor": player_resolution_anchor or {},
                 "npc_response_mode": self._npc_response_mode,
                 "npc_response_policy": self._describe_npc_mode_policy(),
                 "npc_response_expected": bool(
-                    self._npc_response_mode == "reactive" and dm_output.npc_response_needed
+                    dm_output.npc_response_needed
                 ),
                 "npc_response_actor_id": dm_output.npc_actor_id,
             }
@@ -838,17 +868,30 @@ class GameEngine:
                 setattr(current, final_field, value)
             elif operation == ChangeOperation.ADD:
                 if isinstance(target, list):
-                    target.append(value)
+                    if isinstance(value, list):
+                        target.extend(value)
+                    else:
+                        target.append(value)
                 else:
                     logger.warning(f"ADD操作目标不是列表: {field}")
             elif operation == ChangeOperation.DELETE:
                 if isinstance(target, list):
-                    if value in target:
-                        target.remove(value)
+                    if isinstance(value, list):
+                        for one in value:
+                            if one in target:
+                                target.remove(one)
+                    else:
+                        if value in target:
+                            target.remove(value)
                 else:
                     setattr(current, final_field, None)
             else:
                 logger.warning(f"未知操作类型: {operation}")
+
+            # 清理历史脏数据：避免 entities.items/entities.characters 出现嵌套list导致后续unhashable异常
+            if field in {"entities.items", "entities.characters"}:
+                normalized = [x for x in self._flatten_entity_ids(getattr(current, final_field)) if isinstance(x, str)]
+                setattr(current, final_field, normalized)
         except AttributeError as e:
             logger.warning(f"更新字段失败: {field}, {e}")
     
@@ -909,9 +952,19 @@ class GameEngine:
         if NPCDirector is None:
             return None
         try:
-            return NPCDirector()
+            return NPCDirector(use_llm=self._npc_director_use_llm)
         except Exception as e:
             logger.warning(f"初始化NPCDirector失败，将回退旧逻辑: {e}")
+            return None
+
+    def _create_narrative_merger(self):
+        """Create NarrativeMerger with graceful fallback."""
+        if NarrativeMerger is None:
+            return None
+        try:
+            return NarrativeMerger(use_llm=self._narrative_merge_use_llm)
+        except Exception as e:
+            logger.warning(f"初始化NarrativeMerger失败，将使用拼接回退: {e}")
             return None
     
     # ============================================================
@@ -942,6 +995,7 @@ class GameEngine:
         player_check: Optional[CheckOutput] = None,
         player_action_description: str = "",
         npc_action_plan: Optional[Dict[str, Any]] = None,
+        player_resolution_anchor: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """构建NPC推演用的动态上下文，支持queue/reactive双模式。"""
         context: Dict[str, Any] = {
@@ -959,6 +1013,8 @@ class GameEngine:
             context["player_action_description"] = player_action_description
         if npc_action_plan:
             context["npc_action_plan"] = npc_action_plan
+        if player_resolution_anchor:
+            context["player_resolution_anchor"] = player_resolution_anchor
         return context
 
     def _plan_npc_actions(
@@ -966,12 +1022,16 @@ class GameEngine:
         trigger: str,
         dm_output: Optional[DMAgentOutput] = None,
         candidate_npc_ids: Optional[List[str]] = None,
+        player_resolution_anchor: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Use NPCDirector as a unified planning入口，返回{npc_id: plan_dict}。"""
         if not self.npc_director or not hasattr(self.npc_director, "decide_actions"):
             return {}
 
         npc_ids = candidate_npc_ids or []
+        if not npc_ids and dm_output and dm_output.actionable_npcs:
+            npc_ids = [npc_id for npc_id in dm_output.actionable_npcs if npc_id in self.game_state.characters]
+
         if not npc_ids:
             npc_ids = [
                 char_id
@@ -990,12 +1050,21 @@ class GameEngine:
                 elif isinstance(event, dict):
                     recent_events.append(event)
 
+        narrative_context = self._get_narrative_context_for_llm()
+        if player_resolution_anchor:
+            narrative_context = (
+                f"{narrative_context}\n\n"
+                "[PlayerResolutionAnchor]\n"
+                + json.dumps(player_resolution_anchor, ensure_ascii=False, indent=2)
+            ).strip()
+
         decision = self.npc_director.decide_actions(
             npc_ids=npc_ids,
             game_state=self.game_state,
             player_intent=dm_output,
             trigger_source=trigger,
             recent_events=recent_events,
+            narrative_context=narrative_context,
         )
 
         plans: Dict[str, Any] = {}
@@ -1063,28 +1132,30 @@ class GameEngine:
 
     def _describe_npc_mode_policy(self) -> str:
         """返回当前NPC响应模式的策略说明，供Agent动态拼接上下文。"""
+        if self._npc_response_mode == "unified":
+            return "unified: 玩家主流程先执行，再在同回合内统一处理NPC响应；queue/reactive仅用于触发来源标签。"
         if self._npc_response_mode == "reactive":
-            return "reactive: 不执行玩家前置NPC队列；由DM输出的npc_response_*字段决定是否触发本轮NPC追响应答。"
-        return "queue: 玩家输入前最多执行1个NPC前置回合；DM输出的npc_response_*字段只作参考，不直接驱动执行。"
+            return "reactive: 玩家主流程后仅在DM判定需要响应时触发NPC。"
+        return "queue: 玩家主流程后默认触发一次NPC响应，trigger_source标记为queue。"
 
     def set_npc_response_mode(self, mode: str):
-        """设置NPC响应模式：queue(前置队列) / reactive(按需响应)。"""
-        normalized = (mode or "queue").strip().lower()
-        if normalized not in {"queue", "reactive"}:
-            logger.warning(f"未知NPC响应模式: {mode}，回退为queue")
-            normalized = "queue"
+        """设置NPC响应模式：unified(默认) / queue(语义标签) / reactive(语义标签)。"""
+        normalized = (mode or "unified").strip().lower()
+        if normalized not in {"queue", "reactive", "unified"}:
+            logger.warning(f"未知NPC响应模式: {mode}，回退为unified")
+            normalized = "unified"
         self._npc_response_mode = normalized
 
     def _build_dynamic_action_queue(self, last_actor_id: Optional[str] = None) -> List[str]:
         """按可行动性与优先级动态构建行动队列。"""
-        ranked: List[Tuple[str, float]] = []
+        ranked: List[Tuple[Tuple[float, float, float, str], str]] = []
         for char_id, actor in self.game_state.characters.items():
-            score = self._calculate_actor_priority(actor)
-            if score > 0:
-                ranked.append((char_id, score))
+            can_act, sort_key = self._calculate_actor_priority(actor)
+            if can_act:
+                ranked.append((sort_key, char_id))
 
-        ranked.sort(key=lambda x: x[1], reverse=True)
-        ordered_ids = [char_id for char_id, _ in ranked]
+        ranked.sort(key=lambda x: x[0])
+        ordered_ids = [char_id for _, char_id in ranked]
 
         # 若刚行动角色仍可行动，则放到队尾，避免连续行动。
         if last_actor_id and last_actor_id in ordered_ids:
@@ -1093,18 +1164,24 @@ class GameEngine:
 
         return ordered_ids
 
-    def _calculate_actor_priority(self, actor: Character) -> float:
-        """计算角色行动优先级：DEX + HP占比 + SAN占比。"""
+    def _calculate_actor_priority(self, actor: Character) -> Tuple[bool, Tuple[float, float, float, str]]:
+        """按不变量计算行动优先级排序键。"""
         if not self._can_actor_act(actor):
-            return 0.0
+            return (False, ())
 
         max_hp = max(1, actor.status.max_hp)
-        hp_ratio = max(0.0, min(1.0, actor.status.hp / max_hp))
-        # 当前模型没有max_san字段，默认按100作为满值。
-        san_ratio = max(0.0, min(1.0, actor.status.san / 100.0))
-        dex_ratio = max(0.0, min(1.0, actor.attributes.dex / 100.0))
+        hp_ratio = actor.status.hp / max_hp
+        san_ratio = actor.status.san / 100.0
 
-        return round((dex_ratio * 0.5) + (hp_ratio * 0.3) + (san_ratio * 0.2), 6)
+        return (
+            True,
+            (
+                -float(actor.attributes.dex),
+                -float(hp_ratio),
+                -float(san_ratio),
+                actor.id,
+            ),
+        )
     
     def _can_actor_act(self, actor: Character) -> bool:
         """检查角色是否还能继续行动"""
@@ -1134,7 +1211,7 @@ class GameEngine:
         nearby_items: List[Dict[str, Any]] = []
 
         if current_map:
-            for char_id in current_map.entities.characters:
+            for char_id in self._flatten_entity_ids(current_map.entities.characters):
                 char = self.game_state.characters.get(char_id)
                 if char and char.id != self.game_state.player_id:
                     nearby_characters.append({
@@ -1144,7 +1221,7 @@ class GameEngine:
                         "location": char.location,
                     })
 
-            for item_id in current_map.entities.items:
+            for item_id in self._flatten_entity_ids(current_map.entities.items):
                 item = self.game_state.items.get(item_id)
                 if item:
                     nearby_items.append({
@@ -1172,6 +1249,23 @@ class GameEngine:
             } if player else None,
             "narrative_context": self._dump_narrative_context(),
         }
+
+    def _flatten_entity_ids(self, raw_ids: Iterable[Any]) -> List[str]:
+        """扁平化实体ID列表，忽略非字符串值，避免嵌套list污染后续流程。"""
+        result: List[str] = []
+        seen = set()
+        for value in list(raw_ids or []):
+            if isinstance(value, str):
+                if value not in seen:
+                    seen.add(value)
+                    result.append(value)
+            elif isinstance(value, list):
+                for inner in value:
+                    if isinstance(inner, str):
+                        if inner not in seen:
+                            seen.add(inner)
+                            result.append(inner)
+        return result
 
     def _append_narrative_event(
         self,
@@ -1366,6 +1460,152 @@ class GameEngine:
         if hasattr(action_plan, "intent_description"):
             return str(action_plan.intent_description)
         return ""
+
+    def _merge_turn_narratives(
+        self,
+        fragments: List[Dict[str, str]],
+        truth_anchor: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Merge narrative fragments into a single coherent turn narrative."""
+        cleaned = [fragment for fragment in fragments if (fragment.get("text") or "").strip()]
+        if not cleaned:
+            return ""
+
+        if self.narrative_merger and hasattr(self.narrative_merger, "merge"):
+            merged = self.narrative_merger.merge(
+                fragments=cleaned,
+                game_state=self.game_state,
+                context=self._get_narrative_context_for_llm(),
+                truth_anchor=truth_anchor,
+            )
+            if merged:
+                return merged.strip()
+
+        return "\n".join(fragment["text"].strip() for fragment in cleaned if fragment.get("text"))
+
+    def _process_unified_npc_response(
+        self,
+        dm_output: DMAgentOutput,
+        player_check: Optional[CheckOutput],
+        player_resolution_anchor: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """统一后置NPC流程：玩家行动后处理NPC响应。"""
+        if not hasattr(self.state_agent, "evolve_npc_action"):
+            return {"game_over": False, "fragments": []}
+
+        should_trigger = self._npc_response_mode in {"queue", "unified"} or dm_output.npc_response_needed
+        if not should_trigger:
+            return {"game_over": False, "fragments": []}
+
+        candidate_ids = list(dm_output.actionable_npcs or [])
+        if dm_output.npc_actor_id and dm_output.npc_actor_id not in candidate_ids:
+            candidate_ids.append(dm_output.npc_actor_id)
+        if not candidate_ids:
+            queue_candidates = [
+                actor_id
+                for actor_id in self._action_queue
+                if actor_id != self.game_state.player_id
+                and actor_id in self.game_state.characters
+                and self._can_actor_act(self.game_state.characters[actor_id])
+            ]
+            if queue_candidates:
+                candidate_ids.append(queue_candidates[0])
+        if not candidate_ids:
+            default_npc = self._pick_default_npc_actor()
+            if default_npc:
+                candidate_ids.append(default_npc)
+
+        if not candidate_ids:
+            return {"game_over": False, "fragments": []}
+
+        trigger_label = self._npc_response_mode if self._npc_response_mode in {"queue", "reactive"} else "unified"
+        plans = self._plan_npc_actions(
+            trigger=trigger_label,
+            dm_output=dm_output,
+            candidate_npc_ids=candidate_ids,
+            player_resolution_anchor=player_resolution_anchor,
+        )
+        if not plans:
+            return {"game_over": False, "fragments": []}
+
+        queue_order = self._build_dynamic_action_queue()
+        ordered_npc_ids = [npc_id for npc_id in queue_order if npc_id in plans]
+        for npc_id in plans.keys():
+            if npc_id not in ordered_npc_ids:
+                ordered_npc_ids.append(npc_id)
+
+        fragments: List[Dict[str, str]] = []
+        final_ending = ""
+        for npc_id in ordered_npc_ids:
+            npc = self.game_state.characters.get(npc_id)
+            if not npc or npc.is_player or not self._can_actor_act(npc):
+                continue
+
+            plan = plans.get(npc_id)
+            npc_check = self._execute_npc_check(npc)
+            npc_output = self.state_agent.evolve_npc_action(
+                npc_id=npc.id,
+                game_state=self.game_state,
+                check_result=npc_check,
+                npc_intent=self._extract_npc_intent_from_plan(plan) or dm_output.npc_intent,
+                additional_context=self._build_npc_runtime_context(
+                    trigger=trigger_label,
+                    player_check=player_check,
+                    player_action_description=dm_output.action_description,
+                    npc_action_plan=plan,
+                    player_resolution_anchor=player_resolution_anchor,
+                ),
+            )
+
+            if npc_output.changes:
+                self._apply_changes(npc_output.changes)
+
+            if npc_output.narrative:
+                fragments.append(
+                    {
+                        "actor_id": npc.id,
+                        "actor_name": npc.name,
+                        "text": npc_output.narrative,
+                    }
+                )
+
+            if npc_output.is_end:
+                final_ending = npc_output.end_narrative or final_ending
+                return {"game_over": True, "fragments": fragments, "ending": final_ending}
+
+        return {"game_over": False, "fragments": fragments, "ending": final_ending}
+
+    def _build_player_resolution_anchor(
+        self,
+        dm_output: DMAgentOutput,
+        check_result: Optional[CheckOutput],
+        evolution_result: Optional[StateEvolutionOutput],
+    ) -> Dict[str, Any]:
+        """Build a deterministic truth anchor from check system + player resolution."""
+        check_required = bool(dm_output.needs_check)
+        check_outcome = "auto_success"
+        action_succeeded = True
+
+        if check_result is not None:
+            check_outcome = str(check_result.result.value)
+            action_succeeded = check_outcome in {"成功", "大成功"}
+
+        anchor: Dict[str, Any] = {
+            "check_required": check_required,
+            "check_outcome": check_outcome,
+            "action_succeeded": action_succeeded,
+            "action_description": dm_output.action_description,
+            "consistency_rule": "下游NPC决策与叙事必须与check_outcome保持一致，不得改写胜负事实。",
+        }
+
+        if check_result is not None:
+            anchor["check_result"] = check_result.model_dump()
+
+        if evolution_result is not None:
+            anchor["player_narrative"] = evolution_result.narrative
+            anchor["player_changes"] = [change.model_dump() for change in evolution_result.changes]
+
+        return anchor
 
 
 # ============================================================

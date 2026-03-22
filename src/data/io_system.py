@@ -543,7 +543,26 @@ class IOSystem:
                 return ERROR_FIELD_NOT_FOUND
         
         if isinstance(obj, list):
-            obj.append(value)
+            if isinstance(value, list):
+                obj.extend(value)
+            else:
+                obj.append(value)
+
+            # 历史兼容：避免 entities.items/entities.characters 被污染为嵌套list
+            if field in {"entities.items", "entities.characters"}:
+                normalized = []
+                seen = set()
+                for one in list(obj):
+                    if isinstance(one, str):
+                        if one not in seen:
+                            seen.add(one)
+                            normalized.append(one)
+                    elif isinstance(one, list):
+                        for inner in one:
+                            if isinstance(inner, str) and inner not in seen:
+                                seen.add(inner)
+                                normalized.append(inner)
+                obj[:] = normalized
         else:
             return ERROR_OPERATION_INVALID
         

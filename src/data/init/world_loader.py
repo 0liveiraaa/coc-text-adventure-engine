@@ -25,8 +25,10 @@ class WorldBundle:
     game_state: GameState
     world_name: str
     end_condition: str
-    npc_response_mode: str = "queue"
+    npc_response_mode: str = "unified"
     narrative_window: int = 5
+    npc_director_use_llm: bool = True
+    narrative_merge_use_llm: bool = True
 
 
 class WorldLoader:
@@ -93,6 +95,8 @@ class WorldLoader:
             end_condition=self.manifest.get("end_condition", "玩家死亡或达成剧情结局"), #修改建议:这里出现不必要的硬编码了吗?注意核查
             npc_response_mode=self._resolve_npc_response_mode(),
             narrative_window=self._resolve_narrative_window(),
+            npc_director_use_llm=self._resolve_bool_field("npc_director_use_llm", True),
+            narrative_merge_use_llm=self._resolve_bool_field("narrative_merge_use_llm", True),
         )
 
     def load_world_from_config(
@@ -385,10 +389,10 @@ class WorldLoader:
         return list(self._characters.keys())
 
     def _resolve_npc_response_mode(self) -> str:
-        configured = str(self.manifest.get("npc_response_mode", "queue") or "queue").strip().lower()
-        if configured in {"queue", "reactive"}:
+        configured = str(self.manifest.get("npc_response_mode", "unified") or "unified").strip().lower()
+        if configured in {"queue", "reactive", "unified"}:
             return configured
-        return "queue"
+        return "unified"
 
     def _resolve_narrative_window(self) -> int:
         configured = self.manifest.get("narrative_window", 5)
@@ -398,6 +402,18 @@ class WorldLoader:
             return 5
 
         return max(1, value)
+
+    def _resolve_bool_field(self, field_name: str, default: bool) -> bool:
+        raw_value = self.manifest.get(field_name, default)
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, str):
+            normalized = raw_value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return bool(default)
     
     def get_character(self, char_id: str) -> Optional[Character]:
         """获取指定角色"""

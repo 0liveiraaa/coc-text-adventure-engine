@@ -182,6 +182,7 @@ class CheckResult(str, Enum):
 
 class NpcResponseMode(str, Enum):
     """NPC响应模式。"""
+    UNIFIED = "unified"
     QUEUE = "queue"
     REACTIVE = "reactive"
 
@@ -214,7 +215,7 @@ class DMAgentInput(BaseModel):
     player_input: str = Field(..., description="玩家输入")
     dialogue_history: List[str] = Field(default_factory=list, description="对话历史")
     game_context: Dict[str, Any] = Field(default_factory=dict, description="游戏上下文")
-    npc_response_mode: NpcResponseMode = Field(default=NpcResponseMode.QUEUE, description="NPC响应模式")
+    npc_response_mode: NpcResponseMode = Field(default=NpcResponseMode.UNIFIED, description="NPC响应模式")
     additional_context: Dict[str, Any] = Field(default_factory=dict, description="引擎附加上下文")
 
 
@@ -231,6 +232,7 @@ class DMAgentOutput(BaseModel):
     npc_response_needed: bool = Field(default=False, description="是否需要NPC响应")
     npc_actor_id: Optional[str] = Field(default=None, description="需要响应的NPC ID")
     npc_intent: Optional[str] = Field(default=None, description="NPC响应意图描述")
+    actionable_npcs: List[str] = Field(default_factory=list, description="建议本轮可行动NPC列表")
 
 
 # ============================================================
@@ -247,7 +249,7 @@ class StateEvolutionInput(BaseModel):
     is_npc_action: bool = Field(default=False, description="是否为NPC行动")
     npc_intent: Optional[str] = Field(default=None, description="NPC意图")
     npc_info: Optional[Dict[str, Any]] = Field(default=None, description="NPC信息")
-    npc_response_mode: NpcResponseMode = Field(default=NpcResponseMode.QUEUE, description="NPC响应模式")
+    npc_response_mode: NpcResponseMode = Field(default=NpcResponseMode.UNIFIED, description="NPC响应模式")
     trigger_source: str = Field(default="", description="触发来源：queue或reactive")
 
 

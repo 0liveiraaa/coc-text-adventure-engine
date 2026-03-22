@@ -182,6 +182,9 @@ def _start_new_game(engine: GameEngine, args):
             world_name=bundle.world_name,
             end_condition=bundle.end_condition,
             npc_response_mode=bundle.npc_response_mode,
+            narrative_window=bundle.narrative_window,
+            npc_director_use_llm=bundle.npc_director_use_llm,
+            narrative_merge_use_llm=bundle.narrative_merge_use_llm,
         )
 
         if args.name:

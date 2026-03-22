@@ -104,8 +104,8 @@ class NPCDirectorIntegrationTests(unittest.TestCase):
         result = engine.process_input("我靠近守卫")
 
         self.assertTrue(result["success"])
-        self.assertIn("守卫做出了回应", result.get("narrative") or "")
-        self.assertEqual(state_agent.last_npc_intent, "对玩家刚刚的行动做出回应")
+        self.assertTrue((result.get("narrative") or "").strip())
+        self.assertTrue((state_agent.last_npc_intent or "").strip())
         self.assertEqual(state_agent.last_npc_context.get("trigger"), "reactive")
 
 

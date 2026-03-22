@@ -166,8 +166,9 @@ class DisplayManager:
         current_map = game_state.get_current_map()
         if not current_map or not current_map.entities.characters:
             return
-        
-        other_chars = [cid for cid in current_map.entities.characters 
+
+        char_ids = self._flatten_entity_ids(current_map.entities.characters)
+        other_chars = [cid for cid in char_ids
                       if cid != game_state.player_id]
         
         if not other_chars:
@@ -177,8 +178,8 @@ class DisplayManager:
         for char_id in other_chars:
             char = game_state.characters.get(char_id)
             if char:
-                desc = char.description.get_public_text()[:50]
-                print(f"  {self.formatter.highlight('•')} {char.name}: {desc}")
+                desc = self._summarize_text(char.description.get_public_text(), limit=90)
+                print(f"  {self.formatter.highlight('*')} {char.name}: {desc}")
     
     def print_items(self, game_state: GameState):
         """打印场景中的物品"""
@@ -187,11 +188,39 @@ class DisplayManager:
             return
         
         print(self.formatter.section("可见物品"))
-        for item_id in current_map.entities.items:
+        for item_id in self._flatten_entity_ids(current_map.entities.items):
             item = game_state.items.get(item_id)
             if item:
-                desc = item.description.get_public_text()[:40]
-                print(f"  {self.formatter.highlight('•')} {item.name}: {desc}")
+                desc = self._summarize_text(item.description.get_public_text(), limit=80)
+                print(f"  {self.formatter.highlight('*')} {item.name}: {desc}")
+
+    def _flatten_entity_ids(self, raw_ids: Any) -> List[str]:
+        """扁平化实体ID，避免脏数据中的嵌套list导致渲染异常。"""
+        result: List[str] = []
+        seen = set()
+        for value in list(raw_ids or []):
+            if isinstance(value, str):
+                if value not in seen:
+                    seen.add(value)
+                    result.append(value)
+            elif isinstance(value, list):
+                for inner in value:
+                    if isinstance(inner, str) and inner not in seen:
+                        seen.add(inner)
+                        result.append(inner)
+        return result
+
+    def _summarize_text(self, text: str, limit: int = 80) -> str:
+        """Summarize text safely to avoid cutting mid-sentence fragments."""
+        normalized = " ".join((text or "").replace("\n", "；").split())
+        if len(normalized) <= limit:
+            return normalized
+
+        cut = normalized[:limit]
+        best_punct = max(cut.rfind("。"), cut.rfind("；"), cut.rfind("！"), cut.rfind("？"))
+        if best_punct >= int(limit * 0.6):
+            return cut[: best_punct + 1]
+        return cut.rstrip() + "..."
     
     def print_player_status(self, game_state: GameState):
         """打印玩家状态"""
@@ -216,7 +245,7 @@ class DisplayManager:
         """制作进度条"""
         filled = int(width * percent)
         empty = width - filled
-        bar = f"{color}{('█' * filled)}{Colors.DIM}{('░' * empty)}{Colors.RESET}"
+        bar = f"{color}{('#' * filled)}{Colors.DIM}{('-' * empty)}{Colors.RESET}"
         return bar
     
     def print_narrative(self, text: str):
@@ -231,15 +260,45 @@ class DisplayManager:
             "失败": Colors.YELLOW,
             "大失败": Colors.BG_RED + Colors.WHITE,
         }
-        
-        color = result_colors.get(check_result.result, Colors.RESET)
+
+        result_value = getattr(check_result, "result", None)
+        if isinstance(check_result, dict):
+            result_value = check_result.get("result")
+
+        if isinstance(result_value, list):
+            result_value = next((x for x in result_value if x), "")
+        elif hasattr(result_value, "value"):
+            result_value = result_value.value
+
+        result_text = str(result_value or "未知")
+        if "." in result_text:
+            result_text = result_text.split(".")[-1]
+        result_alias = {
+            "CRITICAL_SUCCESS": "大成功",
+            "SUCCESS": "成功",
+            "FAILURE": "失败",
+            "FUMBLE": "大失败",
+        }
+        result_text = result_alias.get(result_text, result_text)
+
+        color = result_colors.get(result_text, Colors.RESET)
+        dice_roll = getattr(check_result, "dice_roll", "-")
+        target_value = getattr(check_result, "target_value", "-")
+        actor_value = getattr(check_result, "actor_value", "-")
+        detail = getattr(check_result, "detail", "")
+        if isinstance(check_result, dict):
+            dice_roll = check_result.get("dice_roll", "-")
+            target_value = check_result.get("target_value", "-")
+            actor_value = check_result.get("actor_value", "-")
+            detail = check_result.get("detail", "")
+
         print(f"\n{self.formatter.section('鉴定结果')}")
-        print(f"  骰子结果: {check_result.dice_roll}")
-        print(f"  目标值: {check_result.target_value}")
-        print(f"  属性值: {check_result.actor_value}")
-        print(f"  结果: {color}{Colors.BOLD}{check_result.result}{Colors.RESET}")
-        if check_result.detail:
-            print(f"  详情: {check_result.detail}")
+        print(f"  骰子结果: {dice_roll}")
+        print(f"  目标值: {target_value}")
+        print(f"  属性值: {actor_value}")
+        print(f"  结果: {color}{Colors.BOLD}{result_text}{Colors.RESET}")
+        if detail:
+            print(f"  详情: {detail}")
     
     def print_event(self, event: str):
         """打印事件信息"""
@@ -371,6 +430,7 @@ class GameCLI:
         self.running = False
         self.game_engine = game_engine
         self._last_displayed_narrative: str = ""
+        self._loop_error_count: int = 0
         logger.info("CLI前端初始化完成")
 
     def run(self):
@@ -446,10 +506,18 @@ class GameCLI:
                         game_engine.restart()
                     else:
                         self.running = False
+
+                # 当前回合执行完成后重置错误计数
+                self._loop_error_count = 0
                     
             except Exception as e:
-                logger.error(f"游戏循环错误: {e}")
+                self._loop_error_count += 1
+                logger.exception(f"游戏循环错误: {e}")
                 self.display.print_error(f"发生错误: {str(e)}")
+                if self._loop_error_count >= 3:
+                    self.display.print_error("连续发生错误，已自动退出游戏循环以避免刷屏。")
+                    self.running = False
+                    break
     
     def _display_game_state(self, game_engine):
         """显示当前游戏状态"""

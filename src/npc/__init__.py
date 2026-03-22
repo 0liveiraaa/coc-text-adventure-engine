@@ -1,5 +1,5 @@
-"""NPC package exports."""
+"""Backward-compatible NPC package exports."""
 
-from .npc_director import NPCDirector
+from src.agent.npc import NPCDirector
 
 __all__ = ["NPCDirector"]

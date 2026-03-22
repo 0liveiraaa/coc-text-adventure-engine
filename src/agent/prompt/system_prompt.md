@@ -51,6 +51,7 @@
 - npc_response_needed: 是否需要NPC在本轮对玩家行动做出响应
 - npc_actor_id: 若需要响应，给出当前场景中可行动NPC的ID
 - npc_intent: 简要描述NPC将如何回应（用于后续NPC推演）
+- actionable_npcs: 给出本轮建议参与响应的NPC ID列表（按优先级顺序）
 
 当上下文中的NPC响应模式为：
 - queue：此字段仅作参考，系统可能走队列前置机制
@@ -87,6 +88,7 @@
   "npc_response_needed": false,
   "npc_actor_id": null,
   "npc_intent": null,
+  "actionable_npcs": [],
   "erro": ""
 }
 ```
@@ -106,6 +108,7 @@
 | npc_response_needed | boolean | 是否需要NPC响应 |
 | npc_actor_id | string/null | 触发响应的NPC ID |
 | npc_intent | string/null | NPC回应意图 |
+| actionable_npcs | array | 本轮建议参与响应的NPC ID列表 |
 | erro | string | 可选。系统错误反馈；若收到反馈需据此修正输出 |
 
 ## 判断规则
@@ -162,3 +165,4 @@
 7. 仅在当前场景确有合适NPC时才将npc_response_needed设为true
 8. npc_actor_id必须使用游戏上下文中存在的角色ID
 9. 若你收到“系统错误反馈（erro）”，必须修正输出后再返回，重点检查check_attributes是否为规则层支持字段
+10. actionable_npcs中的每个ID都必须是当前场景可行动NPC，不能包含玩家ID

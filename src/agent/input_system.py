@@ -77,6 +77,18 @@ class InputSystem:
         """
         self.io = io_system
         logger.info("Input系统初始化完成")
+
+    def _summarize_text(self, text: str, limit: int = 60) -> str:
+        """Summarize text safely to avoid displaying half-sentence fragments."""
+        normalized = " ".join((text or "").replace("\n", "；").split())
+        if len(normalized) <= limit:
+            return normalized
+
+        cut = normalized[:limit]
+        best_punct = max(cut.rfind("。"), cut.rfind("；"), cut.rfind("！"), cut.rfind("？"))
+        if best_punct >= int(limit * 0.6):
+            return cut[: best_punct + 1]
+        return cut.rstrip() + "..."
     
     def parse_input(self, user_input: str) -> InputResult:
         """
@@ -242,7 +254,7 @@ class InputSystem:
                         char = game_state.characters.get(char_id)
                         if char:
                             desc = char.description.get_public_text()
-                            description += f"  • {char.name}: {desc[:50]}...\n"
+                            description += f"  • {char.name}: {self._summarize_text(desc, limit=90)}\n"
             
             # 显示场景中的物品
             if current_map.entities.items:
@@ -251,7 +263,7 @@ class InputSystem:
                     item = game_state.items.get(item_id)
                     if item:
                         desc = item.description.get_public_text()
-                        description += f"  • {item.name}: {desc[:50]}...\n"
+                        description += f"  • {item.name}: {self._summarize_text(desc, limit=80)}\n"
             
             return description, changes
         
@@ -313,8 +325,8 @@ class InputSystem:
         for item_id in player.inventory:
             item = game_state.items.get(item_id)
             if item:
-                desc = item.description.get_public_text()[:30]
-                description += f"  • {item.name}: {desc}...\n"
+                desc = self._summarize_text(item.description.get_public_text(), limit=50)
+                description += f"  • {item.name}: {desc}\n"
             else:
                 description += f"  • [未知物品: {item_id}]\n"
         

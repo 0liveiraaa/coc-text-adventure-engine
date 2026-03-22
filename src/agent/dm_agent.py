@@ -95,6 +95,11 @@ DMAGENT_OUTPUT_SCHEMA = {
             "type": ["string", "null"],
             "description": "NPC响应意图，供后续NPC推演使用"
         },
+        "actionable_npcs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "建议在本回合响应阶段可行动的NPC列表"
+        },
         "erro": {
             "type": "string",
             "description": "可选。系统错误反馈；若存在，需据此修正输出"
@@ -318,6 +323,7 @@ class DMAgent:
             npc_response_needed=data.get("npc_response_needed", False),
             npc_actor_id=data.get("npc_actor_id"),
             npc_intent=data.get("npc_intent"),
+            actionable_npcs=data.get("actionable_npcs", []),
         )
     
     def _build_game_context(self, game_state: Optional[GameState]) -> Dict[str, Any]:
@@ -444,6 +450,8 @@ class DMAgent:
                 )
             if additional_context.get("current_actor_id"):
                 extra_blocks.append(f"## 当前行动者\n{additional_context['current_actor_id']}")
+            if additional_context.get("narrative_context"):
+                extra_blocks.append(f"## 叙事历史上下文\n{additional_context['narrative_context']}")
             if additional_context.get("engine_context"):
                 extra_blocks.append(
                     "## 引擎补充上下文\n"
@@ -592,6 +600,7 @@ class DMAgent:
             npc_response_needed=False,
             npc_actor_id=None,
             npc_intent=None,
+            actionable_npcs=[],
         )
     
     def quick_parse(

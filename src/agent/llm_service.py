@@ -393,7 +393,8 @@ class LLMService:
             )
 
             # 如果配置启用了结构化输出，使用 json_schema 响应格式
-            if self.config.structured_output:
+            structured_output = bool(getattr(getattr(self, "config", None), "structured_output", False))
+            if structured_output:
                 response_format = {
                     "type": "json_schema",
                     "json_schema": {
