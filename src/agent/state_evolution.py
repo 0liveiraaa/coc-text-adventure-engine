@@ -813,7 +813,22 @@ class StateEvolution:
             is_end=False,
             end_narrative=""
         )
-    
+
+    def _field_path_exists(self, entity: Any, field: str) -> bool:
+        """Check whether a dotted field path exists on the target entity."""
+        current = entity
+        for part in field.split("."):
+            if isinstance(current, dict):
+                if part not in current:
+                    return False
+                current = current[part]
+                continue
+            if hasattr(current, part):
+                current = getattr(current, part)
+            else:
+                return False
+        return True
+
     def validate_changes(
         self,
         changes: List[StateChange],
@@ -850,6 +865,10 @@ class StateEvolution:
             field = change.field
             if not field:
                 errors.append(f"{prefix}: 字段路径为空")
+                continue
+
+            if not self._field_path_exists(entity, field):
+                errors.append(f"{prefix}: 字段路径不存在 '{field}'")
                 continue
             
             # 根据操作类型进行额外验证

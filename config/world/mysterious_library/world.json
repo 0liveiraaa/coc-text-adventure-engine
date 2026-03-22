@@ -5,12 +5,13 @@
   "start_map_id": "map-room-library-01",
   "turn_order": [
     "char-player-01",
-    "char-guard-01"
+    "char-guard-01",
+    "char-archivist-01"
   ],
   "narrative_window": 5,
   "npc_response_mode": "reactive",
   "npc_director_use_llm": true,
   "narrative_merge_use_llm": true,
-  "end_condition": "在地下密室找到关键真相并成功离开时或玩家直接选择逃跑逃离这个地方时结束游戏。",
-  "entry_scene_narrative": "深夜，你踏入了神秘图书馆，潮湿的纸张气味与不安同时袭来。"
+  "end_condition": "在地下档案室找到真相并成功离开，或玩家直接逃离时结束游戏。",
+  "entry_scene_narrative": "深夜，你踏入神秘图书馆。潮湿纸张味、低沉脚步声与某种不安同时被听见。"
 }

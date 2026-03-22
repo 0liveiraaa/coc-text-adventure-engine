@@ -5,7 +5,7 @@ COC文字冒险游戏框架 - 数据模型定义
 
 import builtins
 from typing import List, Dict, Optional, Any, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from enum import Enum
 
 
@@ -17,6 +17,30 @@ class Description(BaseModel):
     """二级描述系统 - 支持public和hint"""
     public: List[Dict[str, str]] = Field(default_factory=list, description="公开描述列表")
     hint: str = Field(default="", description="仅AI知道的隐藏提示")
+    model_config = ConfigDict(validate_assignment=True)
+
+    @field_validator("public", mode="before")
+    @classmethod
+    def _normalize_public(cls, value: Any) -> List[Dict[str, str]]:
+        """将历史脏数据统一收敛为列表结构。"""
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = [value]
+        elif isinstance(value, str):
+            value = [{"description": value}]
+        elif not isinstance(value, list):
+            value = [{"description": str(value)}]
+
+        normalized: List[Dict[str, str]] = []
+        for entry in value:
+            if isinstance(entry, dict):
+                text = str(entry.get("description", "")).strip()
+            else:
+                text = str(entry).strip()
+            if text:
+                normalized.append({"description": text})
+        return normalized
 
     def get_public_text(self) -> str:
         """获取所有公开描述的拼接文本"""
@@ -32,7 +56,9 @@ class Description(BaseModel):
     
     def add_public_description(self, text: str) -> None:
         """添加新的公开描述"""
-        self.public.append({"description": text})
+        normalized = str(text).strip()
+        if normalized:
+            self.public.append({"description": normalized})
 
 
 class Memory(BaseModel):
@@ -121,6 +147,34 @@ class MapEntities(BaseModel):
     """地图上的实体"""
     characters: List[str] = Field(default_factory=list, description="角色ID列表")
     items: List[str] = Field(default_factory=list, description="物品ID列表")
+    model_config = ConfigDict(validate_assignment=True)
+
+    @field_validator("characters", "items", mode="before")
+    @classmethod
+    def _normalize_ids(cls, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        elif not isinstance(value, list):
+            value = [value]
+
+        flattened: List[str] = []
+        seen = set()
+
+        def _append(item: Any) -> None:
+            if isinstance(item, str):
+                normalized = item.strip()
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    flattened.append(normalized)
+            elif isinstance(item, list):
+                for inner in item:
+                    _append(inner)
+
+        for entry in value:
+            _append(entry)
+        return flattened
 
 
 class Map(BaseModel):

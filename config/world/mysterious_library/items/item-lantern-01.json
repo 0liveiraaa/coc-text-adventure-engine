@@ -1,13 +1,13 @@
 {
   "id": "item-lantern-01",
-  "name": "煤油灯",
+  "name": "碟油灯",
   "description": {
     "public": [
       {
-        "description": "一盏老式的煤油灯，玻璃罩有些模糊，但还能使用"
+        "description": "一盆老式的碟油灯，玻璃罩有些模糊，但还能使用。"
       }
     ],
-    "hint": "在图书馆昏暗的角落里很有用。守卫常用它来检查偏僻的区域。"
+    "hint": "在图书馆昏暗的角落里很有用。守卫和管理员都知道它能照出一些隐藏的痕迹。"
   },
   "location": "map-room-library-01",
   "is_portable": true

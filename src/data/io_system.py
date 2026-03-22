@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.data.models import (
     Character, Item, Map, GameState, StateChange, ChangeOperation
 )
+from src.utils.consistency_checker import ConsistencyChecker
 
 
 # ============================================================
@@ -122,6 +123,28 @@ class IOSystem:
         (self.json_dir / "characters").mkdir(exist_ok=True)
         (self.json_dir / "items").mkdir(exist_ok=True)
         (self.json_dir / "maps").mkdir(exist_ok=True)
+
+    @staticmethod
+    def _normalize_public_description_value(value: Any) -> List[Dict[str, str]]:
+        """Normalize description.public payloads to the canonical list-of-dicts shape."""
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = [value]
+        elif isinstance(value, str):
+            value = [{"description": value}]
+        elif not isinstance(value, list):
+            value = [{"description": str(value)}]
+
+        normalized: List[Dict[str, str]] = []
+        for entry in value:
+            if isinstance(entry, dict):
+                text = str(entry.get("description", "")).strip()
+            else:
+                text = str(entry).strip()
+            if text:
+                normalized.append({"description": text})
+        return normalized
     
     # ============================================================
     # 字符数据操作
@@ -188,10 +211,24 @@ class IOSystem:
             
             last_part = parts[-1]
             if hasattr(obj, last_part):
+                if field == "inventory":
+                    if not isinstance(value, list):
+                        return ERROR_OPERATION_INVALID
+                    normalized_inventory = []
+                    seen = set()
+                    for item_id in value:
+                        if not isinstance(item_id, str) or not self.get_item(item_id):
+                            return ERROR_ID_NOT_FOUND
+                        if item_id not in seen:
+                            seen.add(item_id)
+                            normalized_inventory.append(item_id)
+                    value = normalized_inventory
                 setattr(obj, last_part, value)
             else:
                 return ERROR_FIELD_NOT_FOUND
             
+            if field == "inventory":
+                return self._save_character_with_inventory_sync(character)
             return self.save_character(character)
         except Exception as e:
             print(f"[IOSystem] 更新角色字段 {char_id}.{field} 失败: {e}")
@@ -283,10 +320,15 @@ class IOSystem:
             
             last_part = parts[-1]
             if hasattr(obj, last_part):
+                if field == "location" and isinstance(value, str) and value:
+                    if not self.get_character(value) and not self.get_map(value):
+                        return ERROR_ID_NOT_FOUND
                 setattr(obj, last_part, value)
             else:
                 return ERROR_FIELD_NOT_FOUND
             
+            if field == "location":
+                return self._save_item_with_relationship_sync(item)
             return self.save_item(item)
         except Exception as e:
             print(f"[IOSystem] 更新物品字段 {item_id}.{field} 失败: {e}")
@@ -360,6 +402,153 @@ class IOSystem:
             if self.mode == "sqlite":
                 self._session.rollback()
             return ERROR_OTHER
+
+    def _get_all_characters(self) -> List[Character]:
+        """加载全部角色。"""
+        try:
+            if self.mode == "sqlite":
+                rows = self._session.query(CharacterORM).all()
+                return [Character(**json.loads(row.data)) for row in rows]
+
+            chars: List[Character] = []
+            for file_path in sorted((self.json_dir / "characters").glob("*.json")):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    chars.append(Character(**json.load(f)))
+            return chars
+        except Exception as e:
+            print(f"[IOSystem] 加载全部角色失败: {e}")
+            return []
+
+    def _get_all_maps(self) -> List[Map]:
+        """加载全部地图。"""
+        try:
+            if self.mode == "sqlite":
+                rows = self._session.query(MapORM).all()
+                return [Map(**json.loads(row.data)) for row in rows]
+
+            maps: List[Map] = []
+            for file_path in sorted((self.json_dir / "maps").glob("*.json")):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    maps.append(Map(**json.load(f)))
+            return maps
+        except Exception as e:
+            print(f"[IOSystem] 加载全部地图失败: {e}")
+            return []
+
+    def _get_all_items(self) -> List[Item]:
+        """加载全部物品。"""
+        try:
+            if self.mode == "sqlite":
+                rows = self._session.query(ItemORM).all()
+                return [Item(**json.loads(row.data)) for row in rows]
+
+            items: List[Item] = []
+            for file_path in sorted((self.json_dir / "items").glob("*.json")):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    items.append(Item(**json.load(f)))
+            return items
+        except Exception as e:
+            print(f"[IOSystem] 加载全部物品失败: {e}")
+            return []
+
+    def _save_entities(self, characters: List[Character], maps: List[Map], items: List[Item]) -> int:
+        """保存一组实体。"""
+        for character in characters:
+            if self.save_character(character) != ERROR_SUCCESS:
+                return ERROR_OTHER
+        for map_obj in maps:
+            if self.save_map(map_obj) != ERROR_SUCCESS:
+                return ERROR_OTHER
+        for item in items:
+            if self.save_item(item) != ERROR_SUCCESS:
+                return ERROR_OTHER
+        return ERROR_SUCCESS
+
+    def _save_item_with_relationship_sync(self, item: Item) -> int:
+        """保存物品并同步持有者关系。"""
+        checker = ConsistencyChecker()
+        characters = self._get_all_characters()
+        maps = self._get_all_maps()
+        item.location = (item.location or "").strip()
+
+        target_char = None
+        target_map = None
+        if item.location:
+            target_char = next((char for char in characters if char.id == item.location), None)
+            target_map = next((map_obj for map_obj in maps if map_obj.id == item.location), None)
+            if not target_char and not target_map:
+                return ERROR_ID_NOT_FOUND
+
+        for character in characters:
+            if item.id in character.inventory and (not target_char or character.id != target_char.id):
+                character.inventory = [item_id for item_id in character.inventory if item_id != item.id]
+
+        for map_obj in maps:
+            if item.id in map_obj.entities.items and (not target_map or map_obj.id != target_map.id):
+                map_obj.entities.items = [item_id for item_id in map_obj.entities.items if item_id != item.id]
+
+        if target_char and item.id not in target_char.inventory:
+            target_char.inventory.append(item.id)
+        if target_map and item.id not in target_map.entities.items:
+            target_map.entities.items.append(item.id)
+
+        if checker.check_item_relationships(item, characters, maps):
+            print(f"[IOSystem] 物品关系一致性检查失败: {item.id}")
+            return ERROR_OTHER
+
+        return self._save_entities(characters, maps, [item])
+
+    def _save_character_with_inventory_sync(self, character: Character) -> int:
+        """保存角色并同步背包物品位置。"""
+        checker = ConsistencyChecker()
+        characters = self._get_all_characters()
+        maps = self._get_all_maps()
+        items = self._get_all_items()
+
+        current_character = next((char for char in characters if char.id == character.id), character)
+        item_lookup = {item.id: item for item in items}
+
+        desired_inventory: List[str] = []
+        seen = set()
+        for item_id in list(character.inventory):
+            if not isinstance(item_id, str):
+                return ERROR_OPERATION_INVALID
+            if item_id not in item_lookup:
+                return ERROR_ID_NOT_FOUND
+            if item_id not in seen:
+                seen.add(item_id)
+                desired_inventory.append(item_id)
+
+        previous_inventory = set(current_character.inventory)
+        current_character.inventory = desired_inventory
+
+        added_item_ids = set(desired_inventory) - previous_inventory
+        removed_item_ids = previous_inventory - set(desired_inventory)
+
+        for item_id in added_item_ids:
+            item = item_lookup[item_id]
+            for other_character in characters:
+                if other_character.id != current_character.id and item_id in other_character.inventory:
+                    other_character.inventory = [value for value in other_character.inventory if value != item_id]
+            for map_obj in maps:
+                if item_id in map_obj.entities.items:
+                    map_obj.entities.items = [value for value in map_obj.entities.items if value != item_id]
+            item.location = current_character.id
+
+        for item_id in removed_item_ids:
+            item = item_lookup[item_id]
+            if item.location == current_character.id:
+                item.location = ""
+
+        affected_items = [item_lookup[item_id] for item_id in sorted(added_item_ids | removed_item_ids)]
+        if affected_items:
+            for item in affected_items:
+                if checker.check_item_relationships(item, characters, maps):
+                    print(f"[IOSystem] 背包同步后的一致性检查失败: {item.id}")
+                    return ERROR_OTHER
+
+        characters = [current_character if char.id == current_character.id else char for char in characters]
+        return self._save_entities([current_character], maps, affected_items)
     
     def update_map_field(self, map_id: str, field: str, value: Any) -> int:
         """更新地图指定字段"""
@@ -497,9 +686,24 @@ class IOSystem:
         if isinstance(entity, Character) and field == "inventory":
             if not isinstance(value, list):
                 return ERROR_OPERATION_INVALID
+            normalized_inventory = []
+            seen = set()
             for item_id in value:
                 if not isinstance(item_id, str) or not self.get_item(item_id):
                     return ERROR_ID_NOT_FOUND
+                if item_id not in seen:
+                    seen.add(item_id)
+                    normalized_inventory.append(item_id)
+            entity.inventory = normalized_inventory
+            return self._save_character_with_inventory_sync(entity)
+
+        if isinstance(entity, Item) and field == "location":
+            if not isinstance(value, str):
+                return ERROR_OPERATION_INVALID
+            if value and not self.get_character(value) and not self.get_map(value):
+                return ERROR_ID_NOT_FOUND
+            entity.location = value
+            return self._save_item_with_relationship_sync(entity)
 
         parts = field.split(".")
         obj = entity
@@ -512,15 +716,10 @@ class IOSystem:
         
         last_part = parts[-1]
         if hasattr(obj, last_part):
-            # 特殊处理：防止 description.public 被错误地从列表替换为字典
             if field == "description.public":
-                current_value = getattr(obj, last_part)
-                # 如果当前是列表，但新值是单个字典，则追加而不是替换
-                if isinstance(current_value, list) and isinstance(value, dict):
-                    current_value.append(value)
-                    result = saver(entity)
-                    return result if result is not None else ERROR_SUCCESS
-            setattr(obj, last_part, value)
+                setattr(obj, last_part, self._normalize_public_description_value(value))
+            else:
+                setattr(obj, last_part, value)
         else:
             return ERROR_FIELD_NOT_FOUND
         
@@ -543,7 +742,9 @@ class IOSystem:
                 return ERROR_FIELD_NOT_FOUND
         
         if isinstance(obj, list):
-            if isinstance(value, list):
+            if field == "description.public":
+                obj.extend(self._normalize_public_description_value(value))
+            elif isinstance(value, list):
                 obj.extend(value)
             else:
                 obj.append(value)

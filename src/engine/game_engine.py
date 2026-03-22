@@ -11,6 +11,7 @@ Game Engine核心模块 - 游戏引擎主类
 
 import logging
 import json
+import copy
 import re
 from typing import Optional, Dict, Any, List, Tuple, Iterable
 from pathlib import Path
@@ -194,9 +195,29 @@ class GameEngine:
                 save_data = json.load(f)
             self.dm_dialogue_log = save_data.pop("dm_dialogue_log", [])
             self._restore_narrative_context(save_data.pop("narrative_context", None))
+            world_metadata = save_data.pop("world_metadata", {})
+            if not isinstance(world_metadata, dict):
+                world_metadata = {}
+            if not world_metadata:
+                world_metadata = {
+                    "world_name": save_data.pop("world_name", self.world_name),
+                    "end_condition": save_data.pop("end_condition", self.end_condition),
+                    "npc_response_mode": save_data.pop("npc_response_mode", self._npc_response_mode),
+                    "narrative_window": save_data.pop("narrative_window", getattr(self.narrative_context, "window_size", 5) if self.narrative_context else 5),
+                    "npc_director_use_llm": save_data.pop("npc_director_use_llm", self._npc_director_use_llm),
+                    "narrative_merge_use_llm": save_data.pop("narrative_merge_use_llm", self._narrative_merge_use_llm),
+                }
             
             # 恢复游戏状态
             self.game_state = GameState(**save_data)
+            self.apply_world_settings(
+                world_name=str(world_metadata.get("world_name", self.world_name) or self.world_name),
+                end_condition=str(world_metadata.get("end_condition", self.end_condition) or self.end_condition),
+                npc_response_mode=str(world_metadata.get("npc_response_mode", self._npc_response_mode) or self._npc_response_mode),
+                narrative_window=int(world_metadata.get("narrative_window", getattr(self.narrative_context, "window_size", 5) if self.narrative_context else 5) or 5),
+                npc_director_use_llm=bool(world_metadata.get("npc_director_use_llm", self._npc_director_use_llm)),
+                narrative_merge_use_llm=bool(world_metadata.get("narrative_merge_use_llm", self._narrative_merge_use_llm)),
+            )
             self._is_game_over = False
             
             logger.info("存档加载成功")
@@ -231,6 +252,15 @@ class GameEngine:
             narrative_state = self._dump_narrative_context()
             if narrative_state:
                 save_data["narrative_context"] = narrative_state
+            save_data["save_version"] = 1
+            save_data["world_metadata"] = {
+                "world_name": self.world_name,
+                "end_condition": self.end_condition,
+                "npc_response_mode": self._npc_response_mode,
+                "narrative_window": getattr(self.narrative_context, "window_size", 5) if self.narrative_context else 5,
+                "npc_director_use_llm": self._npc_director_use_llm,
+                "narrative_merge_use_llm": self._narrative_merge_use_llm,
+            }
             
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -355,7 +385,11 @@ class GameEngine:
                     
                     # 应用基础指令产生的变更
                     if cmd_result.changes:
-                        self._apply_changes(cmd_result.changes)
+                        failures = self._apply_changes(cmd_result.changes)
+                        if failures:
+                            result["success"] = False
+                            result["response"] = f"状态变更失败: {failures[0]}"
+                            return result
                     
                     result["response"] = cmd_result.direct_response
                     return result
@@ -372,38 +406,42 @@ class GameEngine:
                 npc_prelude_text="",
             )
             
-            # 如果是纯对话，直接回复
+            # 纯对话场景优先返回玩家可见回复，但如果 DM 明确要求 NPC 继续响应，
+            # 仍然保留后续流程，避免把“对话”误判成“流程终止”。
             if dm_output.is_dialogue:
                 result["response"] = dm_output.response_to_player
                 self._record_dm_dialogue(natural_input, dm_output.response_to_player)
-                return result
+                if not dm_output.npc_response_needed:
+                    return result
             
             check_output = None
-            
-            # ===== Step 4: 规则系统鉴定 =====
-            if dm_output.needs_check:
-                check_output = self._execute_check(dm_output)
-                result["check_result"] = check_output
-            
-            # ===== Step 5: 状态推演系统 =====
             player_resolution_anchor = self._build_player_resolution_anchor(
                 dm_output=dm_output,
-                check_result=check_output,
+                check_result=None,
                 evolution_result=None,
             )
-            evolution_result = self._state_evolution(
-                dm_output=dm_output,
-                check_result=check_output,
-                player_resolution_anchor=player_resolution_anchor,
-            )
-            player_resolution_anchor = self._build_player_resolution_anchor(
-                dm_output=dm_output,
-                check_result=check_output,
-                evolution_result=evolution_result,
-            )
+
+            # ===== Step 4: 规则系统鉴定 =====
+            if dm_output.needs_check and not dm_output.is_dialogue:
+                check_output = self._execute_check(dm_output)
+                result["check_result"] = check_output
+
+            # ===== Step 5: 状态推演系统 =====
+            evolution_result = None
+            if not dm_output.is_dialogue:
+                evolution_result = self._state_evolution(
+                    dm_output=dm_output,
+                    check_result=check_output,
+                    player_resolution_anchor=player_resolution_anchor,
+                )
+                player_resolution_anchor = self._build_player_resolution_anchor(
+                    dm_output=dm_output,
+                    check_result=check_output,
+                    evolution_result=evolution_result,
+                )
 
             fragments: List[Dict[str, str]] = []
-            if evolution_result.narrative:
+            if evolution_result and evolution_result.narrative:
                 player = self.game_state.get_player()
                 fragments.append(
                     {
@@ -414,14 +452,22 @@ class GameEngine:
                 )
             
             # ===== Step 6: 应用状态变更 =====
-            if evolution_result.changes:
-                self._apply_changes(evolution_result.changes)
+            if evolution_result and evolution_result.changes:
+                failures = self._apply_changes(evolution_result.changes)
+                if failures:
+                    result["success"] = False
+                    result["response"] = f"状态变更失败: {failures[0]}"
+                    return result
 
             npc_follow = self._process_unified_npc_response(
                 dm_output=dm_output,
                 player_check=check_output,
                 player_resolution_anchor=player_resolution_anchor,
             )
+            if npc_follow.get("change_failures"):
+                result["success"] = False
+                result["response"] = f"状态变更失败: {npc_follow['change_failures'][0]}"
+                return result
             fragments.extend(npc_follow.get("fragments", []))
 
             merged_narrative = self._merge_turn_narratives(
@@ -452,10 +498,15 @@ class GameEngine:
             if player:
                 # Keep current_event aligned with the displayed narrative to avoid
                 # next-loop duplicate output showing a different (player-only) version.
-                player.memory.current_event = merged_narrative or evolution_result.narrative
+                player.memory.current_event = (
+                    merged_narrative
+                    or (evolution_result.narrative if evolution_result else "")
+                    or result.get("response")
+                    or ""
+                )
             
             # 结局判定采用双轨：AI主判定，代码规则保底。
-            if evolution_result.is_end:
+            if evolution_result and evolution_result.is_end:
                 self._is_game_over = True
                 self._ending_text = evolution_result.end_narrative or self._evaluate_configured_endings()
                 result["game_over"] = True
@@ -484,7 +535,7 @@ class GameEngine:
                         result["narrative"] += f"\n\n{self._ending_text}"
             
             # ===== Step 7: 回合结束 =====
-            self._turn_end(resolved=evolution_result.resolved)
+            self._turn_end(resolved=evolution_result.resolved if evolution_result else True)
             
         except Exception as e:
             logger.error(f"处理输入时发生错误: {e}")
@@ -556,7 +607,14 @@ class GameEngine:
             )
 
             if npc_output.changes:
-                self._apply_changes(npc_output.changes)
+                failures = self._apply_changes(npc_output.changes)
+                if failures:
+                    return {
+                        "game_over": False,
+                        "narrative": "",
+                        "ending": "",
+                        "change_failures": failures,
+                    }
 
             if npc_output.narrative:
                 narratives.append(f"[{actor.name}] {npc_output.narrative}")
@@ -661,7 +719,14 @@ class GameEngine:
         )
 
         if npc_output.changes:
-            self._apply_changes(npc_output.changes)
+            failures = self._apply_changes(npc_output.changes)
+            if failures:
+                return {
+                    "game_over": False,
+                    "narrative": "",
+                    "ending": "",
+                    "change_failures": failures,
+                }
 
         if npc_output.narrative:
             self._append_narrative_event(
@@ -770,13 +835,18 @@ class GameEngine:
         logger.debug(f"状态推演完成，变更数: {len(evolution_output.changes)}")
         return evolution_output
     
-    def _apply_changes(self, changes: List[StateChange]):
+    def _apply_changes(self, changes: List[StateChange]) -> List[str]:
         """
         应用状态变更 - Step 6
         
         Args:
             changes: 变更列表
+
+        Returns:
+            失败信息列表，空列表表示全部成功
         """
+        transaction_snapshot = self._capture_transaction_snapshot()
+        failures: List[str] = []
         for change in changes:
             normalized_change = self._normalize_state_change(change)
             error_code = self.io.apply_state_change(normalized_change)
@@ -787,7 +857,113 @@ class GameEngine:
                 # 同步更新内存中的游戏状态
                 self._sync_state_change(normalized_change)
             else:
-                logger.warning(f"变更应用失败: {normalized_change.id}.{normalized_change.field}, 错误码: {error_code}")
+                error_message = f"{normalized_change.id}.{normalized_change.field} (错误码: {error_code})"
+                logger.warning(f"变更应用失败: {error_message}")
+                failures.append(error_message)
+                self._restore_transaction_snapshot(transaction_snapshot)
+                break
+
+        return failures
+
+    def _capture_transaction_snapshot(self) -> Dict[str, Any]:
+        """Capture a rollback snapshot before applying a batch of state changes."""
+        return {
+            "game_state": self._sanitize_game_state_snapshot(self.game_state.model_dump()),
+        }
+
+    def _restore_transaction_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Restore in-memory state and persist the restored snapshot back to IO."""
+        try:
+            game_state_data = snapshot.get("game_state", {})
+            if isinstance(game_state_data, dict):
+                sanitized_state = self._sanitize_game_state_snapshot(game_state_data)
+                self.game_state = GameState(**copy.deepcopy(sanitized_state))
+                persist_method = getattr(self.io, "save_game_state", None)
+                if callable(persist_method):
+                    persist_result = persist_method(self.game_state)
+                    if persist_result != 0:
+                        logger.error(
+                            "回滚后持久化失败，内存状态已恢复但IO可能暂时不一致: %s",
+                            persist_result,
+                        )
+            else:
+                logger.warning("回滚快照无效，跳过状态恢复")
+        except Exception as e:
+            logger.error(f"恢复事务快照失败: {e}")
+
+    def _sanitize_game_state_snapshot(self, payload: Any) -> Any:
+        """Coerce snapshot payloads into a schema-safe shape before restore."""
+        if not isinstance(payload, dict):
+            return payload
+
+        data = copy.deepcopy(payload)
+        for group_name in ("characters", "items", "maps"):
+            group = data.get(group_name)
+            if isinstance(group, dict):
+                for entity_data in group.values():
+                    self._sanitize_entity_snapshot(entity_data)
+        return data
+
+    def _sanitize_entity_snapshot(self, entity_data: Any) -> None:
+        if not isinstance(entity_data, dict):
+            return
+
+        description = entity_data.get("description")
+        if isinstance(description, dict) and "public" in description:
+            description["public"] = self._normalize_public_description_snapshot(
+                description.get("public")
+            )
+
+        inventory = entity_data.get("inventory")
+        if inventory is not None:
+            entity_data["inventory"] = self._flatten_snapshot_ids(inventory)
+
+        entities = entity_data.get("entities")
+        if isinstance(entities, dict):
+            for key in ("characters", "items"):
+                if key in entities:
+                    entities[key] = self._flatten_snapshot_ids(entities.get(key))
+
+    def _normalize_public_description_snapshot(self, value: Any) -> List[Dict[str, str]]:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            value = [value]
+        elif isinstance(value, str):
+            value = [{"description": value}]
+        elif not isinstance(value, list):
+            value = [{"description": str(value)}]
+
+        normalized: List[Dict[str, str]] = []
+        for entry in value:
+            if isinstance(entry, dict):
+                text = str(entry.get("description", "")).strip()
+            else:
+                text = str(entry).strip()
+            if text:
+                normalized.append({"description": text})
+        return normalized
+
+    def _flatten_snapshot_ids(self, raw_ids: Any) -> List[str]:
+        result: List[str] = []
+        seen = set()
+
+        def _append(value: Any) -> None:
+            if isinstance(value, str):
+                normalized = value.strip()
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    result.append(normalized)
+            elif isinstance(value, list):
+                for inner in value:
+                    _append(inner)
+
+        if isinstance(raw_ids, list):
+            for item in raw_ids:
+                _append(item)
+        else:
+            _append(raw_ids)
+        return result
 
     def _normalize_state_change(self, change: StateChange) -> StateChange:
         """对LLM产出的变更做ID容错，避免因格式差异导致变更丢失。"""
@@ -1558,7 +1734,14 @@ class GameEngine:
             )
 
             if npc_output.changes:
-                self._apply_changes(npc_output.changes)
+                failures = self._apply_changes(npc_output.changes)
+                if failures:
+                    return {
+                        "game_over": False,
+                        "narrative": "",
+                        "ending": "",
+                        "change_failures": failures,
+                    }
 
             if npc_output.narrative:
                 fragments.append(

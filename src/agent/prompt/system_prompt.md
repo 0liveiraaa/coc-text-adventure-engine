@@ -29,9 +29,10 @@
   - 示例：潜行 vs 侦查、说服 vs 心理学、追逐
 
 ### 4. 鉴定属性 (check_attributes)
-- 列出COC中可能适用的属性，如：
-  - 主属性：str(力量)、con(体质)、siz(体型)、dex(敏捷)、app(外貌)、int(智力)、pow(意志)、edu(教育)
+- 只允许输出规则层真正支持的字段：`str`, `con`, `siz`, `dex`, `app`, `int`, `pow`, `edu`, `hp`, `san`, `lucky`, `luck`
+- 不要输出技能名、中文技能词、推断词或泛化标签，例如 `侦查`、`图书馆使用`、`锁匠`、`心理学`
 - 按相关度排序，最相关的排在前面
+- 如果无法确定适用属性，宁可输出空数组，也不要编造
 
 ### 5. 对抗目标 (check_target)
 - 如果是**对抗鉴定**，明确对抗的是谁（NPC的ID或描述）
@@ -166,3 +167,18 @@
 8. npc_actor_id必须使用游戏上下文中存在的角色ID
 9. 若你收到“系统错误反馈（erro）”，必须修正输出后再返回，重点检查check_attributes是否为规则层支持字段
 10. actionable_npcs中的每个ID都必须是当前场景可行动NPC，不能包含玩家ID
+
+## 额外硬规则
+
+1. `is_dialogue=true` 只表示玩家输入包含直接对话成分，不代表本轮流程结束。
+2. 如果 `is_dialogue=true` 但 `npc_response_needed=true`，必须同时满足两件事：
+   - 先给出 `response_to_player`
+   - 再保留后续 NPC 响应所需字段，不要把它提前裁剪掉
+3. 纯对话和“对话触发 NPC 反应”是两种不同状态：
+   - 纯对话：`is_dialogue=true` 且 `npc_response_needed=false`
+   - 对话后仍需推进：`is_dialogue=true` 且 `npc_response_needed=true`
+4. `response_to_player` 只能表达 DM 对玩家的即时回应，不得代替后续 NPC 反应的叙事结论。
+5. 如果当前场景没有合适 NPC，宁可保持 `npc_response_needed=false`，不要为了补全流程强行设置为 true。
+6. 收到系统错误反馈（`erro`）时，必须逐项修正，并优先检查 `check_attributes` 是否只包含规则层支持字段。
+7. 任何字段都不要凭空改写成不存在的结构；尤其不要把列表型字段当成单个对象输出。
+

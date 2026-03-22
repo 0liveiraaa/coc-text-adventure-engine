@@ -1,21 +1,20 @@
 {
   "id": "char-player-01",
   "name": "调查员",
-  "basic_info": "一位年轻的调查员，受命调查图书馆的异常事件",
+  "basic_info": "一位被叫来调查图书馆异常事件的年轻人。",
   "description": {
     "public": [
       {
-        "description": "一个穿着灰色风衣的年轻人，目光锐利而警觉"
+        "description": "一个穿着灰色风衣的年轻人，目光敏锐，经常下意识打量周围细节。"
       }
     ],
-    "hint": "玩家控制的角色，拥有调查员的本能，对超自然现象敏感"
+    "hint": "玩家控制的角色。对超自然现象敏感，善于观察、推理与临场应变。"
   },
   "location": "map-room-library-01",
-  "inventory": [
-  ],
+  "inventory": [],
   "status": {
     "hp": 20,
-    "max_hp": 12,
+    "max_hp": 20,
     "san": 60,
     "lucky": 50
   },
