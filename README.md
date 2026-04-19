@@ -1,93 +1,409 @@
-# Engine Refacting
+# 🧭 纸境引擎 · Paper Realm Engine
 
-一个基于大语言模型的文字冒险引擎，采用“规则结算 + 世界状态演化 + 叙事合并”的分层架构。仓库同时提供命令行入口和 Streamlit 调试界面，适合做回合级调试、剧情验证和世界数据演示。
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Streamlit](https://img.shields.io/badge/streamlit-1.28%2B-red)](https://streamlit.io/)
 
-## 项目特性
+> 基于 LLM 的开放式文字冒险游戏引擎，采用「规则结算 + 世界状态演化 + 叙事合并」的分层架构
 
-- 自然语言输入与元命令输入统一处理
-- 世界真值与叙事真值分离存储
-- 状态补丁、回滚和一致性校验链路
-- NPC 调度、执行和后处理流程
-- Streamlit 调试面板，可查看回合、日志和运行状态
+---
 
-## 仓库内容
+## 📖 项目简介
 
-- `main.py`：命令行入口，适合直接游玩或做回合调试
-- `streamlit_app.py`：Streamlit 调试界面
-- `src/`：核心引擎、规则系统、数据模型和工具代码
-- `config/`：默认配置、配置 schema 和表单定义
-- `world/`：示例世界数据
-- `docs/spec/`：对外公开的规范与开发手册
+纸境引擎是一款基于大语言模型（LLM）的开放式游戏引擎。它通过多 Agent 协作系统实现智能叙事生成、世界状态管理和一致性校验，为玩家提供沉浸式的角色扮演体验。
 
-## 运行环境
+### 核心设计理念
 
-建议使用 Python 3.10+。项目依赖至少包括 `streamlit`、`pydantic` 和 `PyYAML`；如果你的环境里没有这些包，请先安装后再运行。
+- **DSL 规则引擎**：灵活的规则描述语言，支持条件判定和状态变更
+- **多 Agent 协作**：DM（地下城主）、NPC 调度、NPC 执行、叙事生成等 Agent 各司其职
+- **E1-E7 因果链路**：结构化的回合处理流程，从输入解析到叙事输出的完整链路
 
-## 快速开始
+---
 
-1. 安装依赖。
-2. 按需修改 `config/config.yaml`，填入你的模型地址、API Key 和运行参数。
-3. 选择命令行或 Streamlit 方式启动。
+## ✨ 特性亮点
 
-### 命令行启动
+| 特性 | 描述 |
+|------|------|
+| 🌐 **自然语言交互** | 玩家使用自然语言输入，系统智能解析并路由到对应处理模块 |
+| 🎭 **智能 NPC 系统** | NPC 拥有独立的调度、执行和记忆系统，实现自主行为 |
+| 🌍 **世界状态管理** | 完整的实体管理系统，支持地图、角色、物品等实体 |
+| 🔍 **一致性校验** | 自动检测叙事内容与世界状态的矛盾，并提供修正方案 |
+| 📝 **DSL 规则引擎** | 自定义规则描述语言，支持复杂的条件判定和状态变更 |
+| 🎨 **叙事合并机制** | 多源叙事片段智能合并，生成连贯的游戏叙事 |
+| 🛠️ **Streamlit 调试界面** | 实时查看回合 trace、Agent I/O、世界快照等调试信息 |
+| 💾 **SQLite 持久化** | 世界快照和叙事历史持久化存储，支持回滚和复盘 |
 
-```powershell
+---
+
+## 🏗️ 系统架构
+
+```mermaid
+graph TB
+    subgraph "用户层"
+        User[👤 玩家输入]
+        CLI[⌨️ 命令行 REPL]
+        Web[🌐 Streamlit UI]
+    end
+
+    subgraph "输入处理层"
+        InputSys[输入路由系统]
+        DM[🎲 DM Agent<br/>输入解析与路由]
+    end
+
+    subgraph "核心引擎层"
+        RuleSys[📜 规则系统<br/>DSL 引擎]
+        WorldState[🌍 世界状态管理]
+        NarrTruth[📖 叙事真值池]
+    end
+
+    subgraph "Agent 层"
+        NarrAgent[✍️ 叙事 Agent]
+        EvolutAgent[🔄 演化 Agent]
+        StateAgent[⚙️ 状态变更 Agent]
+        SchedAgent[📋 NPC 调度 Agent]
+        PerformAgent[🎭 NPC 执行 Agent]
+        MergerAgent[🔗 合并 Agent]
+        ConsistAgent[🔎 一致性 Agent]
+    end
+
+    subgraph "数据层"
+        WorldDB[(🌐 世界快照<br/>SQLite)]
+        NarrDB[(📖 叙事历史<br/>SQLite)]
+        Logs[📋 运行日志]
+    end
+
+    User --> CLI
+    User --> Web
+    CLI --> InputSys
+    Web --> InputSys
+    InputSys --> DM
+    DM --> RuleSys
+    DM --> EvolutAgent
+    RuleSys --> WorldState
+    EvolutAgent --> SchedAgent
+    SchedAgent --> PerformAgent
+    PerformAgent --> StateAgent
+    StateAgent --> WorldState
+    EvolutAgent --> NarrAgent
+    StateAgent --> NarrAgent
+    NarrAgent --> MergerAgent
+    MergerAgent --> ConsistAgent
+    ConsistAgent --> WorldState
+    ConsistAgent --> NarrTruth
+    WorldState --> WorldDB
+    NarrTruth --> NarrDB
+    WorldState --> Logs
+    NarrAgent --> Logs
+```
+
+### E1-E7 回合处理链路
+
+```mermaid
+sequenceDiagram
+    participant P as 玩家输入
+    participant E1 as E1: 输入解析
+    participant E2 as E2: 意图识别
+    participant E3 as E3: 规则结算
+    participant E4 as E4: 状态演化
+    participant E5 as E5: 世界投影
+    participant E6 as E6: 叙事生成
+    participant E7 as E7: 因果链路
+
+    P->>E1: 自然语言输入
+    E1->>E2: 解析结果
+    E2->>E3: 意图与上下文
+    E3->>E4: 规则结算结果
+    E4->>E5: 世界状态更新
+    E5->>E6: 叙事上下文
+    E6->>E7: 叙事片段
+    E7-->>P: 最终叙事输出
+```
+
+---
+
+## 🚀 快速开始
+
+### 环境要求
+
+- Python 3.10+
+- OpenAI Compatible API (如阿里云 DashScope)
+
+### 安装步骤
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/0liveiraaa/text-adventure-engine.git
+cd text-adventure-engine
+
+# 2. 创建虚拟环境（推荐）
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# 或
+.\venv\Scripts\activate  # Windows
+
+# 3. 安装依赖
+pip install -r requirements.txt
+
+# 4. 配置 API
+# 编辑 config/config.yaml，填入您的 API Key 和模型配置
+```
+
+### 运行游戏
+
+#### 命令行模式
+
+```bash
 python main.py
 ```
 
-可选参数：
+#### Streamlit 调试界面
 
-- `--world-dir`：指定世界目录，默认是 `world/world1`
-- `--config`：指定配置文件，默认是 `config/config.yaml`
-- `--actor-id`：覆盖默认玩家角色 ID
-- `--show-debug`：每回合输出调试 payload
-
-说明：命令行入口当前只支持真实 LLM；不要传 `--use-fake-llm`。
-
-### Streamlit 启动
-
-```powershell
+```bash
 streamlit run streamlit_app.py
 ```
 
-Streamlit 侧边栏可切换世界、配置文件、模型名、真实 LLM 开关和调试显示。
+打开浏览器访问 `http://localhost:8501` 即可看到交互式游戏界面。
 
-## 配置说明
+---
 
-默认配置文件是 `config/config.yaml`。配置加载优先级为：命令行覆盖 > 环境变量 > 配置文件 > 默认值。
+## 📁 项目结构
 
-常见字段：
+```
+engine_refacting/
+├── main.py                 # 命令行游戏入口
+├── streamlit_app.py        # Streamlit Web 界面入口
+├── requirements.txt        # Python 依赖清单
+│
+├── config/                 # 配置文件目录
+│   ├── config.yaml         # 主配置文件
+│   ├── config.form.yaml   # 表单配置
+│   └── config.schema.yaml # 配置 schema
+│
+├── src/                    # 核心源代码
+│   ├── agent/              # Agent 实现
+│   │   ├── llm/           # LLM 调用服务
+│   │   │   ├── service.py           # LLM 服务基类
+│   │   │   ├── input_agent.py       # DM 输入解析 Agent
+│   │   │   ├── evolution_agent.py   # 演化 Agent
+│   │   │   ├── narrative_agent.py   # 叙事生成 Agent
+│   │   │   ├── statechange_agent.py # 状态变更 Agent
+│   │   │   ├── merger_agent.py      # 叙事合并 Agent
+│   │   │   ├── consistency_agent.py # 一致性校验 Agent
+│   │   │   ├── npc_schedul_agent.py # NPC 调度 Agent
+│   │   │   └── npc_perform_agent.py # NPC 执行 Agent
+│   │   └── prompt/        # Agent 提示词模板
+│   ├── config/            # 配置加载
+│   ├── data/              # 数据模型
+│   │   ├── model/         # Pydantic 数据模型
+│   │   └── model/input/   # 输入模型
+│   ├── engine/            # 游戏引擎核心
+│   │   ├── engine.py      # 主引擎
+│   │   ├── turn_orchestrator.py   # 回合协调器
+│   │   └── consistency_orchestrator.py  # 一致性协调器
+│   ├── rule/              # 规则系统
+│   │   ├── dsl.py         # DSL 引擎
+│   │   ├── rule_system.py # 规则系统
+│   │   └── state_patch.py # 状态补丁
+│   ├── storage/           # 持久化存储
+│   │   ├── sqlite_narrative_repository.py
+│   │   └── sqlite_world_snapshot_repository.py
+│   ├── interface/         # 接口定义
+│   └── utils/            # 工具函数
+│
+├── world/                 # 世界数据目录
+│   ├── world1/           # 示例世界
+│   │   ├── world.json    # 世界元数据
+│   │   ├── map/          # 地图数据
+│   │   ├── charactor/    # 角色数据
+│   │   ├── item/         # 物品数据
+│   │   └── end/          # 结局配置
+│   └── world2/           # 另一个示例世界
+│
+├── docs/                  # 文档目录
+│   └── spec/              # 规范文档
+│
+└── LICENSE               # MIT 许可证
+```
 
-- `llm`：模型名、API Base、API Key、温度、超时和 token 上限
-- `system`：重试、降级和快照间隔
-- `agent`：DM、NPC 和叙事侧的记忆参数
-- `storage`：世界真值和叙事真值 SQLite 路径
-- `runtime`：回合 ID、trace ID 和流式输出节奏
+---
 
-环境变量支持 `ER_` 前缀，例如 `ER_LLM__MODEL`、`ER_SYSTEM__MAX_RETRY_COUNT`。
+## ⚙️ 配置说明
 
-## 世界数据
+主配置文件位于 `config/config.yaml`，主要配置项：
 
-`world/` 下提供了两个示例世界：`world1/` 和 `world2/`。每个世界目录通常包含：
+### LLM 配置
 
-- `world.json`：世界元信息
-- `map/`：地图定义
-- `charactor/`：角色定义
-- `item/`：物品定义
-- `end/`：结局规则
+```yaml
+llm:
+  api_key: YOUR_API_KEY_HERE
+  api_base: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen3.6-plus
+  temperature: 0.7
+  max_tokens: 5012
+  timeout: 30
+  enable_reasoning: false
+```
 
-运行时生成的 SQLite 数据和日志会写到 `world/` 下的本地文件中，这些内容已加入忽略规则，不建议提交到仓库。
+### Agent 配置
 
-## 文档范围
+```yaml
+agent:
+  dm:
+    memory_turns: 5        # DM 记忆窗口
+  npc:
+    memory_turns: 15       # NPC 长期记忆
+    shortlog_turns: 30     # NPC 短日志窗口
+    max_actions_per_turn: 3
+  narrative:
+    recent_turns: 5        # 叙事记忆窗口
+```
 
-仓库中仅保留 `docs/spec/` 作为公开文档内容，其他 `docs/` 子目录不作为对外发布内容。
+### 存储配置
 
-## 开源前检查
+```yaml
+storage:
+  world:
+    sqlite_path: world/world_snapshots.sqlite3
+  narrative:
+    sqlite_path: world/narrative_truth.sqlite3
+```
 
-- 确认 `config/config.yaml` 里没有真实密钥或私有地址
-- 确认 `world/` 下没有未清理的运行时数据库和日志
-- 确认本机路径、账号信息和临时调试内容没有残留在公开文档里
+---
 
-## 许可证
+## 🎮 创建自定义世界
 
-当前仓库未包含许可证文件。准备公开到 GitHub 前，建议补充一个明确的开源许可证。
+### 1. 创建世界目录
+
+```bash
+mkdir -p world/my_world/{map,charactor,item,end}
+```
+
+### 2. 编写世界元数据
+
+创建 `world/my_world/world.json`：
+
+```json
+{
+  "scene_name": "我的世界",
+  "default_actor_id": "char-player-0000",
+  "turn_start": 1,
+  "turn_limit": 50
+}
+```
+
+### 3. 添加角色
+
+创建 `world/my_world/charactor/characters.json`：
+
+```json
+{
+  "characters": {
+    "char-player-0000": {
+      "id": "char-player-0000",
+      "name": "玩家",
+      "description": "一位勇敢的冒险者",
+      "attributes": {
+        "敏捷": 10,
+        "力量": 8,
+        "智力": 9
+      },
+      "location": "map-home-0000"
+    }
+  }
+}
+```
+
+### 4. 定义结局
+
+创建 `world/my_world/end/endings.json`：
+
+```json
+{
+  "endings": [
+    {
+      "id": "ending-escape",
+      "condition": "location == 'map-exit-0000'",
+      "text": "恭喜你成功逃出了迷宫！"
+    }
+  ]
+}
+```
+
+---
+
+## 📖 DSL 规则语法
+
+引擎支持简单的 DSL 规则用于结局判定和条件触发：
+
+| 语法 | 说明 | 示例 |
+|------|------|------|
+| `==` | 等于比较 | `location == 'map-exit-0000'` |
+| `!=` | 不等于 | `status != 'dead'` |
+| `>` `<` `>=` `<=` | 数值比较 | `agility > 10` |
+| `and` `or` | 逻辑运算 | `agility > 10 and has_key == true` |
+| `in` | 包含判定 | `location in ['room1', 'room2']` |
+
+---
+
+## 🛠️ 调试工具
+
+### Streamlit Debug 面板
+
+启动 Streamlit 后，勾选侧栏「开启 Debug UI」，可以查看：
+
+- **E1-E7 链路日志**：完整展示每个回合的处理链路
+- **Agent I/O**：每个 Agent 的输入输出详情
+- **世界快照**：当前世界状态的完整 JSON
+- **叙事池**：已生成的叙事片段列表
+
+### 命令行调试
+
+```bash
+# 显示完整 debug 输出
+python main.py --show-debug
+
+# 指定世界目录
+python main.py --world-dir world/world2
+```
+
+---
+
+## 📝 开发指南
+
+### Agent 开发工作流
+
+1. 更新 `docs/spec/draft_spec.md` 规范
+2. 更新 `src/data/model/*` 数据模型
+3. 更新 `src/agent/prompt/*` 提示词模板
+4. 更新 `src/agent/llm/*` 调用实现
+5. 更新 `src/engine/engine.py` 集成逻辑
+
+### 代码规范
+
+- 使用 Pydantic v2 进行数据验证
+- 所有 Agent 继承 `LLMServiceBase`
+- 使用类型注解提升代码可读性
+
+---
+
+## 📄 许可证
+
+本项目基于 [MIT 许可证](LICENSE) 开源，您可以自由使用、修改和分发本项目。
+
+---
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+---
+
+## 📧 联系方式
+
+- GitHub Issues: [https://github.com/0liveiraaa/text-adventure-engine/issues](https://github.com/0liveiraaa/text-adventure-engine/issues)
+
+---
+
+<div align="center">
+  <sub>Made with ❤️ by the community</sub>
+</div>
